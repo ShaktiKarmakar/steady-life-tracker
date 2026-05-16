@@ -22,6 +22,8 @@ class _CustomHabitScreenState extends ConsumerState<CustomHabitScreen> {
   final _increment = TextEditingController(text: '250');
   final _unit = TextEditingController(text: 'ml');
   HabitTimeOfDay _when = HabitTimeOfDay.anytime;
+  bool _reminderEnabled = false;
+  TimeOfDay _reminderTime = const TimeOfDay(hour: 9, minute: 0);
 
   @override
   void dispose() {
@@ -45,6 +47,10 @@ class _CustomHabitScreenState extends ConsumerState<CustomHabitScreen> {
     final ga = double.tryParse(_goalAmt.text) ?? 2000;
     final inc = double.tryParse(_increment.text) ?? 1;
 
+    final reminderTime = _reminderEnabled
+        ? '${_reminderTime.hour.toString().padLeft(2, '0')}:${_reminderTime.minute.toString().padLeft(2, '0')}'
+        : null;
+
     final habit = Habit(
       id: '',
       name: name,
@@ -57,6 +63,8 @@ class _CustomHabitScreenState extends ConsumerState<CustomHabitScreen> {
       unitLabel: _unit.text.trim(),
       timeOfDay: _when,
       accentColor: 0xFF7C6AF7,
+      reminderEnabled: _reminderEnabled,
+      reminderTime: reminderTime,
     );
 
     await ref.read(habitTrackerProvider.notifier).addHabit(habit);
@@ -144,6 +152,29 @@ class _CustomHabitScreenState extends ConsumerState<CustomHabitScreen> {
             ],
             onChanged: (v) => setState(() => _when = v ?? _when),
           ),
+          const SizedBox(height: 16),
+          SwitchListTile(
+            title: const Text('Daily reminder'),
+            subtitle: Text(_reminderEnabled
+                ? 'At ${_reminderTime.format(context)}'
+                : 'Off'),
+            value: _reminderEnabled,
+            onChanged: (v) => setState(() => _reminderEnabled = v),
+          ),
+          if (_reminderEnabled)
+            ListTile(
+              title: const Text('Reminder time'),
+              trailing: Text(_reminderTime.format(context)),
+              onTap: () async {
+                final picked = await showTimePicker(
+                  context: context,
+                  initialTime: _reminderTime,
+                );
+                if (picked != null) {
+                  setState(() => _reminderTime = picked);
+                }
+              },
+            ),
           const SizedBox(height: 24),
           FilledButton(
             onPressed: _save,

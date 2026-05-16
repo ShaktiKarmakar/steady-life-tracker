@@ -1,8 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
-/// Downloads a model from Hugging Face with an optional Bearer token, then
-/// [FlutterGemma.installModel] can load the file via [fromFile].
 class GemmaModelDownloader {
   GemmaModelDownloader._();
 
@@ -12,7 +10,6 @@ class GemmaModelDownloader {
       receiveTimeout: const Duration(hours: 4),
       followRedirects: true,
       maxRedirects: 16,
-      // Fail on 401/403 so callers can prompt for a Hugging Face token.
       validateStatus: (code) => code != null && code >= 200 && code < 300,
     ),
   );
@@ -28,6 +25,7 @@ class GemmaModelDownloader {
       headers['Authorization'] = 'Bearer $bearerToken';
     }
 
+    debugPrint('[GemmaModelDownloader] Starting download: $url');
     try {
       await _dio.download(
         url,
@@ -36,16 +34,23 @@ class GemmaModelDownloader {
         deleteOnError: true,
         onReceiveProgress: (received, total) {
           if (total > 0) {
-            onProgress((received / total).clamp(0, 1));
+            final double progress = (received / total).clamp(0, 1);
+            onProgress(progress);
+            if (received % (total ~/ 10) < 1024 * 1024) {
+              final mb = (received / (1024 * 1024)).round();
+              final totalMb = (total / (1024 * 1024)).round();
+              debugPrint('[GemmaModelDownloader] Progress: $mb MB / $totalMb MB (${(progress * 100).round()}%)');
+            }
           } else {
             onProgress(0);
           }
         },
       );
+      debugPrint('[GemmaModelDownloader] Download complete: $filePath');
     } on DioException catch (e) {
+      debugPrint('[GemmaModelDownloader] Download failed: ${e.type} - ${e.message}');
       if (e.response?.statusCode == 401) {
-        debugPrint(
-            '[GemmaModelDownloader] 401 — set a Hugging Face read token in Settings/onboarding.');
+        debugPrint('[GemmaModelDownloader] 401 — set a Hugging Face read token in Settings/onboarding.');
       }
       rethrow;
     }

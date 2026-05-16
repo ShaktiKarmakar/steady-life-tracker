@@ -1,44 +1,5 @@
 export 'habit_models.dart';
-
-class CalorieEntry {
-  CalorieEntry({
-    required this.id,
-    required this.description,
-    required this.calories,
-    required this.protein,
-    required this.carbs,
-    required this.fat,
-    required this.timestamp,
-  });
-
-  final String id;
-  final String description;
-  final int calories;
-  final int protein;
-  final int carbs;
-  final int fat;
-  final DateTime timestamp;
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'description': description,
-    'calories': calories,
-    'protein': protein,
-    'carbs': carbs,
-    'fat': fat,
-    'timestamp': timestamp.toIso8601String(),
-  };
-
-  factory CalorieEntry.fromJson(Map<String, dynamic> json) => CalorieEntry(
-    id: json['id'] as String,
-    description: json['description'] as String,
-    calories: json['calories'] as int,
-    protein: json['protein'] as int,
-    carbs: json['carbs'] as int,
-    fat: json['fat'] as int,
-    timestamp: DateTime.parse(json['timestamp'] as String),
-  );
-}
+export 'food_models.dart';
 
 class WorkoutEntry {
   WorkoutEntry({

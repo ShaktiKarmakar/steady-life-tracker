@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
-import '../../../core/theme/app_theme.dart';
+import '../../../core/design_system/design_tokens.dart';
 import '../../../shared/models/models.dart';
-import '../../../shared/widgets/animated_blobs_background.dart';
 import '../../../shared/widgets/gradient_ring.dart';
 import '../habit_formatters.dart';
 import '../habit_tracker_notifier.dart';
@@ -38,8 +37,10 @@ class _HabitStatisticsScreenState extends ConsumerState<HabitStatisticsScreen> {
     final monthEnd = DateTime(_month.year, _month.month + 1, 0);
     final daysInMonth = monthEnd.day;
 
+    final progressIndex = tracker.progressIndex;
+
     final monthlyRate = _monthlyCompletionRate(
-      tracker.dayProgress,
+      progressIndex,
       filteredHabits,
       monthStart,
       monthEnd,
@@ -49,13 +50,13 @@ class _HabitStatisticsScreenState extends ConsumerState<HabitStatisticsScreen> {
       (m, h) => h.longestStreak > m ? h.longestStreak : m,
     );
     final perfectDays = _perfectDaysCount(
-      tracker.dayProgress,
+      progressIndex,
       filteredHabits,
       monthStart,
       monthEnd,
     );
     final totalDone = _totalLogsCount(
-      tracker.dayProgress,
+      progressIndex,
       filteredHabits,
       monthStart,
       monthEnd,
@@ -69,7 +70,7 @@ class _HabitStatisticsScreenState extends ConsumerState<HabitStatisticsScreen> {
 
     return Stack(
       children: [
-        const Positioned.fill(child: AnimatedBlobsBackground()),
+        Container(color: Theme.of(context).scaffoldBackgroundColor),
         SafeArea(
           child: ListView(
             padding: const EdgeInsets.all(16),
@@ -121,7 +122,7 @@ class _HabitStatisticsScreenState extends ConsumerState<HabitStatisticsScreen> {
                 monthStart: monthStart,
                 daysInMonth: daysInMonth,
                 habits: filteredHabits,
-                progress: tracker.dayProgress,
+                progressIndex: progressIndex,
               ),
               const SizedBox(height: 16),
               Center(
@@ -130,8 +131,15 @@ class _HabitStatisticsScreenState extends ConsumerState<HabitStatisticsScreen> {
                     GradientRing(
                       value: monthlyRate,
                       label: '${(monthlyRate * 100).round()}%',
-                      gradient: const LinearGradient(
-                        colors: [AppColors.accentPurple, AppColors.accentPink],
+                      gradient: LinearGradient(
+                        colors: [
+                          Theme.of(context).brightness == Brightness.dark
+                              ? DesignTokens.textSecondaryDark
+                              : DesignTokens.textSecondaryLight,
+                          Theme.of(context).brightness == Brightness.dark
+                              ? DesignTokens.textMutedDark
+                              : DesignTokens.textMutedLight,
+                        ],
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -200,10 +208,18 @@ class _FilterChipCircle extends StatelessWidget {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             border: Border.all(
-              color: selected ? AppColors.accentPurple : AppColors.glassBorder,
+              color: selected
+                  ? (Theme.of(context).brightness == Brightness.dark
+                      ? DesignTokens.textSecondaryDark
+                      : DesignTokens.textSecondaryLight)
+                  : (Theme.of(context).brightness == Brightness.dark
+                      ? DesignTokens.borderDefaultDark
+                      : DesignTokens.borderDefaultLight),
               width: selected ? 2 : 1,
             ),
-            color: AppColors.bgSecondary,
+            color: Theme.of(context).brightness == Brightness.dark
+                ? DesignTokens.bgSurfaceDark
+                : DesignTokens.bgSurfaceLight,
           ),
           child: Text(label, style: const TextStyle(fontSize: 18)),
         ),
@@ -217,13 +233,13 @@ class _MonthDotsGrid extends StatelessWidget {
     required this.monthStart,
     required this.daysInMonth,
     required this.habits,
-    required this.progress,
+    required this.progressIndex,
   });
 
   final DateTime monthStart;
   final int daysInMonth;
   final List<Habit> habits;
-  final List<HabitDayProgress> progress;
+  final Map<String, Map<String, HabitDayProgress>> progressIndex;
 
   @override
   Widget build(BuildContext context) {
@@ -255,7 +271,7 @@ class _MonthDotsGrid extends StatelessWidget {
                     daysInMonth: daysInMonth,
                     monthStart: monthStart,
                     habits: habits,
-                    progress: progress,
+                    progressIndex: progressIndex,
                   ),
                 ),
             ],
@@ -271,14 +287,14 @@ class _DayDot extends StatelessWidget {
     required this.daysInMonth,
     required this.monthStart,
     required this.habits,
-    required this.progress,
+    required this.progressIndex,
   });
 
   final int dayIndex;
   final int daysInMonth;
   final DateTime monthStart;
   final List<Habit> habits;
-  final List<HabitDayProgress> progress;
+  final Map<String, Map<String, HabitDayProgress>> progressIndex;
 
   @override
   Widget build(BuildContext context) {
@@ -287,13 +303,13 @@ class _DayDot extends StatelessWidget {
     }
     final day = DateTime(monthStart.year, monthStart.month, dayIndex + 1);
     final key = dateKeyFrom(day);
+    final dayMap = progressIndex[key];
     var metAny = false;
     if (habits.isNotEmpty) {
       metAny = habits.every((h) {
-        final p = progress.where((e) => e.habitId == h.id && e.dateKey == key);
-        if (p.isEmpty) return false;
-        final amt = p.first.amount;
-        return _metAmount(h, amt);
+        final p = dayMap?[h.id];
+        if (p == null) return false;
+        return _metAmount(h, p.amount);
       });
     }
     return AspectRatio(
@@ -304,7 +320,13 @@ class _DayDot extends StatelessWidget {
           height: 10,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: metAny ? AppColors.accentTeal : Colors.white12,
+            color: metAny
+                ? (Theme.of(context).brightness == Brightness.dark
+                    ? DesignTokens.okTextDark
+                    : DesignTokens.okTextLight)
+                : (Theme.of(context).brightness == Brightness.dark
+                    ? DesignTokens.textFaintDark
+                    : DesignTokens.textFaintLight),
           ),
         ),
       ),
@@ -320,7 +342,7 @@ bool _metAmount(Habit h, double amount) {
 }
 
 double _monthlyCompletionRate(
-  List<HabitDayProgress> progress,
+  Map<String, Map<String, HabitDayProgress>> progressIndex,
   List<Habit> habits,
   DateTime monthStart,
   DateTime monthEnd,
@@ -332,10 +354,11 @@ double _monthlyCompletionRate(
       !d.isAfter(monthEnd);
       d = d.add(const Duration(days: 1))) {
     final key = dateKeyFrom(d);
+    final dayMap = progressIndex[key];
     for (final h in habits) {
       slots++;
-      final p = progress.where((e) => e.habitId == h.id && e.dateKey == key);
-      final amt = p.isEmpty ? 0.0 : p.first.amount;
+      final p = dayMap?[h.id];
+      final amt = p?.amount ?? 0.0;
       if (_metAmount(h, amt)) met++;
     }
   }
@@ -344,7 +367,7 @@ double _monthlyCompletionRate(
 }
 
 int _perfectDaysCount(
-  List<HabitDayProgress> progress,
+  Map<String, Map<String, HabitDayProgress>> progressIndex,
   List<Habit> habits,
   DateTime monthStart,
   DateTime monthEnd,
@@ -355,10 +378,11 @@ int _perfectDaysCount(
       !d.isAfter(monthEnd);
       d = d.add(const Duration(days: 1))) {
     final key = dateKeyFrom(d);
+    final dayMap = progressIndex[key];
     var all = true;
     for (final h in habits) {
-      final p = progress.where((e) => e.habitId == h.id && e.dateKey == key);
-      final amt = p.isEmpty ? 0.0 : p.first.amount;
+      final p = dayMap?[h.id];
+      final amt = p?.amount ?? 0.0;
       if (!_metAmount(h, amt)) all = false;
     }
     if (all) perfect++;
@@ -367,7 +391,7 @@ int _perfectDaysCount(
 }
 
 int _totalLogsCount(
-  List<HabitDayProgress> progress,
+  Map<String, Map<String, HabitDayProgress>> progressIndex,
   List<Habit> habits,
   DateTime monthStart,
   DateTime monthEnd,
@@ -378,9 +402,10 @@ int _totalLogsCount(
         !d.isAfter(monthEnd);
         d = d.add(const Duration(days: 1))) {
       final key = dateKeyFrom(d);
-      final p = progress.where((e) => e.habitId == h.id && e.dateKey == key);
-      if (p.isEmpty) continue;
-      if (_metAmount(h, p.first.amount)) n++;
+      final dayMap = progressIndex[key];
+      final p = dayMap?[h.id];
+      if (p == null) continue;
+      if (_metAmount(h, p.amount)) n++;
     }
   }
   return n;
@@ -395,12 +420,10 @@ List<(Habit, DateTime, String)> _doneTodayList(
   final habits = filterId == null
       ? tracker.habits
       : tracker.habits.where((h) => h.id == filterId).toList();
+  final dayMap = tracker.progressIndex[todayKey];
   for (final h in habits) {
-    final prog = tracker.dayProgress.where(
-      (p) => p.habitId == h.id && p.dateKey == todayKey,
-    );
-    if (prog.isEmpty) continue;
-    final p = prog.first;
+    final p = dayMap?[h.id];
+    if (p == null) continue;
     for (final ev in p.events) {
       out.add((
         h,
@@ -440,7 +463,7 @@ class _StatTile extends StatelessWidget {
     return SizedBox(
       width: 160,
       child: Card(
-        color: AppColors.bgSecondary,
+        color: DesignTokens.bgSurfaceDark,
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(

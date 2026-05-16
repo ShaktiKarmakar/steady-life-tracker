@@ -76,9 +76,12 @@
 	<string>Microphone access is used for voice commands in AI chat.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Speech recognition converts your voice into habit commands.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Steady reads your workout data to track movement automatically.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
+		<string>processing</string>
 	</array>
 </dict>
 </plist>

@@ -1,13 +1,26 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:speech_to_text/speech_to_text.dart';
+import 'package:lucide_icons/lucide_icons.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 
+import '../../core/ai/food_vision_service.dart';
 import '../../core/ai/gemma_service.dart';
-import '../../core/theme/app_theme.dart';
-import '../habits/habit_ai_command_executor.dart';
-import '../habits/habit_tracker_notifier.dart';
-import '../../shared/widgets/glass_card.dart';
+import '../../core/ai/mcp_core.dart';
+import '../../core/design_system/design_tokens.dart';
+import '../../shared/models/food_models.dart';
+import '../../shared/providers/app_state.dart';
+import 'chat_messages_provider.dart';
+import 'voice_input_provider.dart';
+import 'widgets/food_review_card.dart';
+
+final _uuid = const Uuid();
 
 class AiHubScreen extends ConsumerStatefulWidget {
   const AiHubScreen({super.key});
@@ -16,206 +29,234 @@ class AiHubScreen extends ConsumerStatefulWidget {
   ConsumerState<AiHubScreen> createState() => _AiHubScreenState();
 }
 
-class _AiHubScreenState extends ConsumerState<AiHubScreen>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabController;
-  final _chatCtrl = TextEditingController();
-  final _scrollCtrl = ScrollController();
-  final List<Map<String, String>> _chatMessages = [];
-  final _picker = ImagePicker();
-  final _speech = SpeechToText();
-  final _emailOriginal = TextEditingController();
-  final _emailIntent = TextEditingController(
-      text: 'Politely decline and propose next week');
-  String _emailDraft = '';
-  bool _emailLoading = false;
-  bool _chatLoading = false;
-  bool _speechAvailable = false;
-  bool _listening = false;
-  String? _pendingImagePath;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-    _tabController.addListener(() => setState(() {}));
-  }
-
-  Future<void> _initSpeech() async {
-    try {
-      final ok = await _speech.initialize(
-        onStatus: (status) {
-          if (!mounted) return;
-          if (status == 'done' || status == 'notListening') {
-            setState(() => _listening = false);
-          }
-        },
-        onError: (error) {
-          if (!mounted) return;
-          setState(() => _listening = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Speech error: ${error.errorMsg}')),
-          );
-        },
-      );
-      if (mounted) setState(() => _speechAvailable = ok);
-    } catch (_) {
-      if (mounted) setState(() => _speechAvailable = false);
-    }
-  }
+class _AiHubScreenState extends ConsumerState<AiHubScreen> {
+  final _ctrl = TextEditingController();
+  final _scrollController = ScrollController();
+  bool _busy = false;
 
   @override
   void dispose() {
-    _tabController.dispose();
-    _chatCtrl.dispose();
-    _scrollCtrl.dispose();
-    _emailOriginal.dispose();
-    _emailIntent.dispose();
+    _ctrl.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void _clearChat() {
-    ref.read(gemmaServiceProvider).clearChat();
-    setState(() => _chatMessages.clear());
+  Future<void> _send(String text) async {
+    if (text.trim().isEmpty) return;
+    final msg = text.trim();
+    _ctrl.clear();
+
+    final notifier = ref.read(chatMessagesProvider.notifier);
+    notifier.addUser(msg);
+    setState(() => _busy = true);
+    _scrollToBottom();
+
+    try {
+      final client = McpClient(
+        gemma: ref.read(gemmaServiceProvider),
+        ref: ref,
+        server: McpServer.instance,
+      );
+
+      String result;
+      final fast = await client.fastPath(msg);
+      if (fast != null) {
+        result = fast;
+      } else {
+        final history = _buildHistory();
+        result = await client.executeTurn(msg, history: history);
+      }
+
+      notifier.addAi(result);
+    } catch (e) {
+      notifier.addAi('Error: $e');
+    } finally {
+      setState(() => _busy = false);
+      _scrollToBottom();
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final uiAsync = ref.watch(aiModelUiStatusProvider);
+  /// Resize image to max dimension 512 to keep vision encoder stable.
+  static Future<Uint8List> _resizeImage(Uint8List imageBytes, {int maxDimension = 512}) async {
+    try {
+      final codec = await ui.instantiateImageCodec(imageBytes);
+      final frame = await codec.getNextFrame();
+      final original = frame.image;
+      final srcW = original.width;
+      final srcH = original.height;
+      if (srcW <= maxDimension && srcH <= maxDimension) {
+        original.dispose();
+        return imageBytes;
+      }
+      final ratio = srcW > srcH
+          ? maxDimension / srcW
+          : maxDimension / srcH;
+      final targetW = (srcW * ratio).round();
+      final targetH = (srcH * ratio).round();
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            const Text('Steady AI'),
-            const SizedBox(width: 8),
-            uiAsync.when(
-              data: (s) => Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: s.inferenceReady
-                      ? Colors.greenAccent
-                      : s.weightsOnDisk
-                          ? Colors.amberAccent
-                          : Colors.orangeAccent,
-                ),
-              ),
-              loading: () => const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-              error: (_, _) => Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.redAccent,
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      canvas.drawRect(
+        ui.Rect.fromLTWH(0, 0, targetW.toDouble(), targetH.toDouble()),
+        ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+      );
+      canvas.drawImageRect(
+        original,
+        ui.Rect.fromLTWH(0, 0, srcW.toDouble(), srcH.toDouble()),
+        ui.Rect.fromLTWH(0, 0, targetW.toDouble(), targetH.toDouble()),
+        ui.Paint()..filterQuality = ui.FilterQuality.high,
+      );
+      final picture = recorder.endRecording();
+      final resized = await picture.toImage(targetW, targetH);
+      picture.dispose();
+      original.dispose();
+
+      final byteData = await resized.toByteData(format: ui.ImageByteFormat.png);
+      resized.dispose();
+      if (byteData == null) throw StateError('PNG encoding failed');
+      return byteData.buffer.asUint8List();
+    } catch (e) {
+      debugPrint('[AiHub] Image resize failed: $e, using original');
+      return imageBytes;
+    }
+  }
+
+  Future<void> _pickImage() async {
+    try {
+      debugPrint('[AiHub] Opening image picker...');
+      final picker = ImagePicker();
+      debugPrint('[AiHub] Picker created, calling pickImage...');
+      final picked = await picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 85,
+      );
+      debugPrint('[AiHub] pickImage returned: ${picked?.path ?? 'null'}');
+      if (picked == null) {
+        debugPrint('[AiHub] User canceled or picker failed');
+        return;
+      }
+
+      debugPrint('[AiHub] Reading bytes from ${picked.path}');
+      final rawBytes = await picked.readAsBytes();
+      debugPrint('[AiHub] Read ${rawBytes.length} bytes');
+      final bytes = await _resizeImage(rawBytes);
+      debugPrint('[AiHub] Resized to ${bytes.length} bytes');
+    final fileName = '${_uuid.v4()}.jpg';
+    final docsDir = await getApplicationDocumentsDirectory();
+    final photoDir = Directory('${docsDir.path}/food_photos');
+    await photoDir.create(recursive: true);
+    final filePath = '${photoDir.path}/$fileName';
+    await File(filePath).writeAsBytes(bytes);
+
+    final notifier = ref.read(chatMessagesProvider.notifier);
+    notifier.addUserImage(filePath, text: picked.name);
+    setState(() => _busy = true);
+    _scrollToBottom();
+
+    try {
+      final vision = FoodVisionService(gemma: ref.read(gemmaServiceProvider));
+      final (result, raw) = await vision.analyzePhoto(imageBytes: bytes);
+      setState(() => _busy = false);
+
+      if (!mounted) return;
+
+      if (result != null) {
+        await _showReviewSheet(result, filePath);
+      } else {
+        notifier.addAi(
+          'I had trouble reading the nutrition data. Here is what I saw:\n\n$raw\n\n'
+          'Try describing what you ate in text.',
+        );
+        _scrollToBottom();
+      }
+    } catch (e, st) {
+      debugPrint('[AiHub] Photo analysis failed: $e\n$st');
+      setState(() => _busy = false);
+      notifier.addAi(
+        'Could not analyze the photo. Try describing what you ate instead.',
+      );
+      _scrollToBottom();
+    }
+    } catch (e, st) {
+      debugPrint('[AiHub] _pickImage error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not pick image: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _showReviewSheet(FoodAnalysisResult result, String photoPath) async {
+    if (!mounted) return;
+    final notifier = ref.read(chatMessagesProvider.notifier);
+
+    var logged = false;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.85,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (_, scrollController) {
+          return Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            child: SingleChildScrollView(
+              controller: scrollController,
+              padding: const EdgeInsets.all(16),
+              child: FoodReviewCard(
+                result: result,
+                photoPath: photoPath,
+                actions: FoodReviewActions(
+                  onLog: (finalResult, mealType) {
+                    logged = true;
+                    Navigator.pop(ctx);
+                    ref.read(foodEntriesProvider.notifier).logWithAi(
+                      finalResult,
+                      mealType: mealType,
+                      photoPath: photoPath,
+                    );
+                    notifier.addAi(
+                      'Logged ${finalResult.totalCalories} kcal for ${mealType.label.toLowerCase()}. ✅',
+                    );
+                    _scrollToBottom();
+                  },
                 ),
               ),
             ),
-          ],
-        ),
-        actions: [
-          if (_tabController.index == 0)
-            IconButton(
-              tooltip: 'New chat',
-              icon: const Icon(Icons.add_comment_outlined),
-              onPressed: _chatLoading ? null : _clearChat,
-            ),
-        ],
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: AppColors.accentPurple,
-          labelColor: AppColors.accentPurple,
-          unselectedLabelColor: Colors.white70,
-          tabs: const [
-            Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Chat'),
-            Tab(icon: Icon(Icons.mail_outline), text: 'Email'),
-          ],
-        ),
-      ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Material(
-            color: Colors.black26,
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: uiAsync.when(
-                      data: (s) => Text(
-                        s.subtitle,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          height: 1.25,
-                          color: Colors.white70,
-                        ),
-                      ),
-                      loading: () => const Text(
-                        'Checking on-device model…',
-                        style: TextStyle(fontSize: 12, color: Colors.white54),
-                      ),
-                      error: (e, _) => Text(
-                        'Status error: $e',
-                        style: const TextStyle(
-                            fontSize: 12, color: Colors.redAccent),
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Refresh status',
-                    icon: const Icon(Icons.refresh, size: 20),
-                    onPressed: () {
-                      ref.read(aiModelUiTickProvider.notifier).bump();
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Expanded(
-            child: TabBarView(
-              controller: _tabController,
-              children: [
-                _ChatTab(
-                  controller: _chatCtrl,
-                  scrollController: _scrollCtrl,
-                  messages: _chatMessages,
-                  loading: _chatLoading,
-                  speechAvailable: _speechAvailable,
-                  listening: _listening,
-                  pendingImagePath: _pendingImagePath,
-                  onPickCamera: _captureImage,
-                  onPickGallery: _pickFromGallery,
-                  onToggleVoice: _toggleVoice,
-                  onSend: _sendChat,
-                ),
-                _EmailTab(
-                  originalCtrl: _emailOriginal,
-                  intentCtrl: _emailIntent,
-                  draft: _emailDraft,
-                  loading: _emailLoading,
-                  onDraft: _draftEmail,
-                ),
-              ],
-            ),
-          ),
-        ],
+          );
+        },
       ),
     );
+
+    if (!logged) {
+      notifier.addAi('Photo analysis complete. You can close the review without logging.');
+      _scrollToBottom();
+    }
+  }
+
+  List<McpChatTurn> _buildHistory() {
+    final messages = ref.read(chatMessagesProvider);
+    final start = (messages.length - 6).clamp(0, messages.length);
+    final recent = messages.sublist(start);
+    return recent
+        .map((m) => McpChatTurn(role: m.role, text: m.text))
+        .toList();
   }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          0,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
@@ -223,357 +264,273 @@ class _AiHubScreenState extends ConsumerState<AiHubScreen>
     });
   }
 
-  Future<void> _sendChat(String text) async {
-    if (text.trim().isEmpty) return;
-    final trimmed = text.trim();
-    final imagePath = _pendingImagePath;
-    setState(() {
-      _chatMessages.add({'role': 'user', 'text': trimmed});
-      _chatMessages.add({'role': 'ai', 'text': ''});
-      _chatLoading = true;
-      _pendingImagePath = null;
-    });
-    _chatCtrl.clear();
-    _scrollToBottom();
-    final aiIndex = _chatMessages.length - 1;
-    try {
-      await for (final chunk in ref.read(gemmaServiceProvider).askChatStream(
-            trimmed,
-            imagePath: imagePath,
-          )) {
-        if (!mounted) return;
-        setState(() {
-          final prev = _chatMessages[aiIndex]['text'] ?? '';
-          _chatMessages[aiIndex] = {'role': 'ai', 'text': prev + chunk};
-        });
-        _scrollToBottom();
-      }
-      await _applyHabitCommand(trimmed);
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _chatMessages[aiIndex] = {'role': 'ai', 'text': 'Error: $e'};
-        });
-      }
-    } finally {
-      if (mounted) setState(() => _chatLoading = false);
-    }
-  }
-
-  Future<void> _draftEmail() async {
-    setState(() => _emailLoading = true);
-    try {
-      final draft = await ref.read(gemmaServiceProvider).draftEmailReply(
-            _emailOriginal.text,
-            _emailIntent.text,
-          );
-      setState(() => _emailDraft = draft);
-    } catch (e) {
-      setState(() => _emailDraft = 'Error generating draft: $e');
-    } finally {
-      setState(() => _emailLoading = false);
-    }
-  }
-
-  Future<void> _applyHabitCommand(String userText) async {
-    final habits = ref.read(habitTrackerProvider).habits;
-    final habitNames = habits.map((h) => h.name).toList();
-    final payload =
-        await ref.read(gemmaServiceProvider).extractHabitCommand(
-              userText,
-              knownHabits: habitNames,
-              contextHint: habitNames.isEmpty
-                  ? ''
-                  : 'Existing habits: ${habitNames.join(', ')}',
-            );
-    if (payload == null) return;
-    final cmd = HabitAiCommand.fromJson(payload);
-    final notifier = ref.read(habitTrackerProvider.notifier);
-    final outcome = await HabitAiCommandExecutor.execute(notifier, cmd);
-    if (outcome.isEmpty || !mounted) return;
-    setState(() => _chatMessages.add({'role': 'ai', 'text': outcome}));
-    _scrollToBottom();
-  }
-
-  Future<void> _captureImage() async {
-    try {
-      final file = await _picker.pickImage(source: ImageSource.camera);
-      if (file == null) return;
-      setState(() => _pendingImagePath = file.path);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Camera error: $e')),
-      );
-    }
-  }
-
-  Future<void> _pickFromGallery() async {
-    try {
-      final file = await _picker.pickImage(source: ImageSource.gallery);
-      if (file == null) return;
-      setState(() => _pendingImagePath = file.path);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Gallery error: $e')),
-      );
-    }
-  }
-
   Future<void> _toggleVoice() async {
-    if (!_speechAvailable) {
-      await _initSpeech();
-      if (!_speechAvailable && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Speech recognition unavailable')),
-        );
-      }
-      if (!_speechAvailable) return;
-    }
-    if (_listening) {
-      await _speech.stop();
-      if (mounted) setState(() => _listening = false);
+    final speech = ref.read(speechToTextProvider);
+    if (speech.isListening) {
+      await speech.stopListening();
       return;
     }
-    try {
-      await _speech.listen(
-        onResult: (result) {
-          if (!mounted) return;
-          setState(() {
-            _chatCtrl.text = result.recognizedWords;
-            _chatCtrl.selection = TextSelection.fromPosition(
-              TextPosition(offset: _chatCtrl.text.length),
-            );
-            _listening = !result.finalResult;
-          });
-        },
-        listenOptions: SpeechListenOptions(
-          partialResults: true,
-        ),
-      );
-      if (mounted) setState(() => _listening = true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _listening = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Voice input error: $e')),
-      );
-    }
+    await speech.startListening(onResult: (words) {
+      if (words.trim().isNotEmpty) _send(words);
+    });
   }
-}
-
-class _ChatTab extends StatelessWidget {
-  const _ChatTab({
-    required this.controller,
-    required this.scrollController,
-    required this.messages,
-    required this.loading,
-    required this.speechAvailable,
-    required this.listening,
-    required this.pendingImagePath,
-    required this.onPickCamera,
-    required this.onPickGallery,
-    required this.onToggleVoice,
-    required this.onSend,
-  });
-  final TextEditingController controller;
-  final ScrollController scrollController;
-  final List<Map<String, String>> messages;
-  final bool loading;
-  final bool speechAvailable;
-  final bool listening;
-  final String? pendingImagePath;
-  final VoidCallback onPickCamera;
-  final VoidCallback onPickGallery;
-  final VoidCallback onToggleVoice;
-  final ValueChanged<String> onSend;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Expanded(
-          child: messages.isEmpty
-              ? const Center(
-                  child: Text(
-                    'Ask anything…',
-                    style: TextStyle(color: Colors.white38),
-                  ),
-                )
-              : ListView.builder(
-                  controller: scrollController,
-                  padding: const EdgeInsets.all(16),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final msg = messages[index];
-                    final isUser = msg['role'] == 'user';
-                    return Align(
-                      alignment: isUser
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        constraints: BoxConstraints(
-                            maxWidth:
-                                MediaQuery.of(context).size.width * 0.8),
-                        child: GlassCard(
-                          padding: const EdgeInsets.all(12),
-                          child: Text(
-                            msg['text'] ?? '',
-                            style: TextStyle(
-                              color: isUser
-                                  ? AppColors.accentTeal
-                                  : Colors.white,
-                            ),
-                          ),
-                        ),
+    final messages = ref.watch(chatMessagesProvider);
+    final speech = ref.watch(speechToTextProvider);
+    final gemma = ref.watch(gemmaServiceProvider);
+    final inferenceReady = gemma.realInferenceActive;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    final userBubbleColor = isDark
+        ? DesignTokens.accentActiveDark.withValues(alpha: 0.4)
+        : DesignTokens.accentActiveLight.withValues(alpha: 0.6);
+    final aiBubbleColor = isDark
+        ? DesignTokens.bgSurfaceDark
+        : DesignTokens.bgSurfaceLight;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Steady AI'),
+        actions: [
+          if (!inferenceReady)
+            Padding(
+              padding: const EdgeInsets.only(right: 16),
+              child: Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.zapOff, size: 14, color: DesignTokens.warnTextDark),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Offline',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: DesignTokens.warnTextDark,
                       ),
-                    );
-                  },
+                    ),
+                  ],
                 ),
-        ),
-        if (loading)
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            child: LinearProgressIndicator(minHeight: 2),
+              ),
+            ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(12),
+              reverse: true,
+              itemCount: messages.length + (_busy ? 1 : 0),
+              itemBuilder: (context, i) {
+                if (_busy && i == 0) {
+                  return const _ThinkingBubble();
+                }
+                final msg = messages[messages.length - 1 - i + (_busy ? 1 : 0)];
+                return _MessageBubble(
+                  msg: msg,
+                  userColor: userBubbleColor,
+                  aiColor: aiBubbleColor,
+                );
+              },
+            ),
           ),
-        if (pendingImagePath != null)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Image attached',
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: _pickImage,
+                    icon: const Icon(LucideIcons.camera),
+                  ),
+                  IconButton(
+                    onPressed: _toggleVoice,
+                    icon: Icon(
+                      speech.isListening ? LucideIcons.mic : LucideIcons.micOff,
+                      color: speech.isListening
+                          ? (isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight)
+                          : null,
+                    ),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: _ctrl,
+                      decoration: const InputDecoration(
+                        hintText: 'Ask or command...',
+                        border: OutlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      ),
+                      onSubmitted: _send,
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _send(_ctrl.text),
+                    icon: const Icon(LucideIcons.send),
+                  ),
+                ],
               ),
             ),
           ),
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              IconButton(
-                tooltip: 'Camera',
-                onPressed: onPickCamera,
-                icon: const Icon(Icons.camera_alt_outlined),
-              ),
-              IconButton(
-                tooltip: 'Gallery',
-                onPressed: onPickGallery,
-                icon: const Icon(Icons.photo_library_outlined),
-              ),
-              IconButton(
-                tooltip: listening ? 'Stop voice' : 'Voice input',
-                onPressed: onToggleVoice,
-                icon: Icon(
-                  listening ? Icons.mic : Icons.mic_none,
-                  color: listening
-                      ? AppColors.accentPink
-                      : (speechAvailable ? null : Colors.white38),
-                ),
-              ),
-              Expanded(
-                child: TextField(
-                  controller: controller,
-                  decoration: const InputDecoration(
-                    hintText: 'Ask anything...',
-                    filled: true,
-                  ),
-                  onSubmitted: onSend,
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                onPressed: () => onSend(controller.text),
-                icon: const Icon(Icons.send, color: AppColors.accentPurple),
-              ),
-            ],
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-class _EmailTab extends StatelessWidget {
-  const _EmailTab({
-    required this.originalCtrl,
-    required this.intentCtrl,
-    required this.draft,
-    required this.loading,
-    required this.onDraft,
+class _MessageBubble extends StatelessWidget {
+  const _MessageBubble({
+    required this.msg,
+    required this.userColor,
+    required this.aiColor,
   });
-  final TextEditingController originalCtrl;
-  final TextEditingController intentCtrl;
-  final String draft;
-  final bool loading;
-  final VoidCallback onDraft;
+  final ChatMessage msg;
+  final Color userColor;
+  final Color aiColor;
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        GlassCard(
-          child: Column(
-            children: [
-              TextField(
-                controller: originalCtrl,
-                minLines: 3,
-                maxLines: 6,
-                decoration: const InputDecoration(
-                  labelText: 'Original email',
+    final isUser = msg.role == 'user';
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: msg.isImage
+            ? const EdgeInsets.all(4)
+            : const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: isUser ? userColor : aiColor,
+          borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+          border: isUser
+              ? null
+              : Border.all(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? DesignTokens.borderDefaultDark
+                      : DesignTokens.borderDefaultLight,
+                  width: DesignTokens.borderWidthDefault,
+                ),
+        ),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * (msg.isImage ? 0.65 : 0.75),
+        ),
+        child: msg.isImage
+            ? _ImageBubble(msg: msg)
+            : Text(
+                msg.text,
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Theme.of(context).textTheme.bodyMedium?.color,
                 ),
               ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: intentCtrl,
-                decoration: const InputDecoration(labelText: 'Your intent'),
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
+      ),
+    );
+  }
+}
+
+class _ImageBubble extends StatelessWidget {
+  const _ImageBubble({required this.msg});
+  final ChatMessage msg;
+
+  @override
+  Widget build(BuildContext context) {
+    final file = File(msg.imagePath!);
+    final exists = file.existsSync();
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(DesignTokens.radiusSm),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: 280,
+          maxHeight: 320,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (exists)
+              Image.file(
+                file,
                 width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: loading ? null : onDraft,
-                  child: loading
-                      ? const SizedBox(
-                          height: 16,
-                          width: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Draft reply'),
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _buildError(),
+              )
+            else
+              _buildError(),
+            if (msg.text.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 6, 8, 4),
+                child: Text(
+                  msg.text,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).textTheme.bodySmall?.color,
+                  ),
                 ),
               ),
-            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildError() {
+    return Container(
+      width: double.infinity,
+      height: 120,
+      color: Colors.grey.shade800,
+      child: const Center(
+        child: Icon(Icons.broken_image, color: Colors.white54),
+      ),
+    );
+  }
+}
+
+class _ThinkingBubble extends StatelessWidget {
+  const _ThinkingBubble();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).brightness == Brightness.dark
+              ? DesignTokens.bgSurfaceDark
+              : DesignTokens.bgSurfaceLight,
+          borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+          border: Border.all(
+            color: Theme.of(context).brightness == Brightness.dark
+                ? DesignTokens.borderDefaultDark
+                : DesignTokens.borderDefaultLight,
+            width: DesignTokens.borderWidthDefault,
           ),
         ),
-        if (draft.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          GlassCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text('Draft',
-                        style: Theme.of(context).textTheme.titleMedium),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 18),
-                      onPressed: () {
-                        // clipboard copy could be added here
-                      },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                SelectableText(draft),
-              ],
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Theme.of(context).textTheme.bodySmall?.color,
+              ),
             ),
-          ),
-        ],
-      ],
+            const SizedBox(width: 10),
+            Text(
+              'Thinking...',
+              style: TextStyle(
+                color: Theme.of(context).textTheme.bodySmall?.color,
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

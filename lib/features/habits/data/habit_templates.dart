@@ -16,6 +16,8 @@ class HabitTemplate {
     this.unitLabel = 'ml',
     this.timeOfDay = HabitTimeOfDay.anytime,
     this.accentColor = 0xFF7C6AF7,
+    this.reminderEnabled = false,
+    this.reminderTime,
   });
 
   final String name;
@@ -28,6 +30,8 @@ class HabitTemplate {
   final String unitLabel;
   final HabitTimeOfDay timeOfDay;
   final int accentColor;
+  final bool reminderEnabled;
+  final String? reminderTime;
 
   Habit toHabit() => Habit(
         id: _uuid.v4(),
@@ -41,6 +45,8 @@ class HabitTemplate {
         unitLabel: unitLabel,
         timeOfDay: timeOfDay,
         accentColor: accentColor,
+        reminderEnabled: reminderEnabled,
+        reminderTime: reminderTime,
       );
 }
 

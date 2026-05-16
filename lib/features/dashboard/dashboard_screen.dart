@@ -1,252 +1,158 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
-import '../../core/ai/gemma_service.dart';
-import '../../core/theme/app_theme.dart';
+import '../../core/design_system/animations.dart';
+import '../../core/design_system/design_tokens.dart';
 import '../../features/habits/habit_tracker_notifier.dart';
 import '../../shared/models/models.dart';
 import '../../shared/providers/app_state.dart';
-import '../../shared/widgets/animated_blobs_background.dart';
-import '../../shared/widgets/glass_card.dart';
-import '../../shared/widgets/gradient_ring.dart';
+import '../../shared/providers/nutrition_goals_provider.dart';
+import '../../shared/widgets/animated_list_item.dart';
+import '../../shared/widgets/steady_card.dart';
 
-class DashboardScreen extends ConsumerStatefulWidget {
+class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
   @override
-  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
-}
-
-class _DashboardScreenState extends ConsumerState<DashboardScreen> {
-  String _aiBriefing = '';
-  bool _briefingLoading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _generateBriefing());
-  }
-
-  Future<void> _generateBriefing() async {
-    if (!mounted) return;
-    setState(() => _briefingLoading = true);
-    try {
-      final habits = ref.read(habitsProvider);
-      final calories = ref.read(caloriesProvider);
-      final workouts = ref.read(workoutsProvider);
-      final briefing = await ref.read(gemmaServiceProvider)
-          .generateDailyBriefing(habits, calories, workouts);
-      if (mounted) setState(() => _aiBriefing = briefing);
-    } catch (e) {
-      debugPrint('Briefing error: $e');
-      if (mounted) {
-        setState(() => _aiBriefing =
-            'Welcome back! Track your habits, meals, and workouts to get personalized insights.');
-      }
-    } finally {
-      if (mounted) setState(() => _briefingLoading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final aiUi = ref.watch(aiModelUiStatusProvider);
+  Widget build(BuildContext context, WidgetRef ref) {
     final habits = ref.watch(habitsProvider);
-    final calorieEntries = ref.watch(caloriesProvider);
-    final workouts = ref.watch(workoutsProvider);
-    final notes = ref.watch(notesProvider);
-    final reels = ref.watch(reelsProvider);
-
+    final todayCalories = ref.watch(todayCaloriesProvider);
+    final workoutMins = ref.watch(todayWorkoutMinutesProvider);
+    final goals = ref.watch(dailyGoalsProvider(DateTime.now()));
+    final remaining = (goals.calories - todayCalories).clamp(0, goals.calories);
     final now = DateTime.now();
-    final todayCalories = calorieEntries
-        .where((e) =>
-            e.timestamp.year == now.year &&
-            e.timestamp.month == now.month &&
-            e.timestamp.day == now.day)
-        .fold<int>(0, (s, e) => s + e.calories);
-    final todayWorkouts = workouts.where((e) =>
-        e.timestamp.year == now.year &&
-        e.timestamp.month == now.month &&
-        e.timestamp.day == now.day);
-    final workoutMins = todayWorkouts.fold<int>(0, (s, e) => s + e.durationMin);
-    // Simple heuristic life score: habits + calories progress + workout
-    final calProgress = (todayCalories / 2000).clamp(0.0, 1.0);
     final habitN = ref.read(habitTrackerProvider.notifier);
-    final habitScore = habits.isEmpty
-        ? 0.0
-        : habits.where((h) => habitN.isMetOnDate(h, now)).length / habits.length;
-    final workoutScore = (workoutMins / 30).clamp(0.0, 1.0);
-    final lifeScore = ((calProgress + habitScore + workoutScore) / 3)
-        .clamp(0.0, 1.0);
+    final metHabits = habits.where((h) => habitN.isMetOnDate(h, now)).length;
 
     return Scaffold(
-      body: Stack(
-        children: [
-          const Positioned.fill(child: AnimatedBlobsBackground()),
-          RefreshIndicator(
-            onRefresh: () async => _generateBriefing(),
-            color: AppColors.accentPurple,
-            backgroundColor: AppColors.bgSecondary,
-            child: SafeArea(
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  const _Header(),
-                  const SizedBox(height: 12),
-                  _AiModelLine(
-                    aiUi,
-                    onRefresh: () =>
-                        ref.read(aiModelUiTickProvider.notifier).bump(),
-                    onRepairDownload: () async {
-                      await ref
-                          .read(gemmaServiceProvider)
-                          .removeLocalModelForReinstall();
-                      ref.read(aiModelUiTickProvider.notifier).bump();
-                      if (context.mounted) context.go('/onboarding');
-                    },
+      body: SafeArea(
+        child: CustomScrollView(
+          physics: const BouncingScrollPhysics(
+            decelerationRate: ScrollDecelerationRate.fast,
+          ),
+          slivers: [
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+                child: AnimatedListItem(
+                  index: 0,
+                  child: _Header(
+                    habitsMet: metHabits,
+                    totalHabits: habits.length,
                   ),
-                  const SizedBox(height: 12),
-                  _AiBriefingCard(
-                    text: _aiBriefing,
-                    loading: _briefingLoading,
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: GlassCard(
-                          child: Column(
-                            children: [
-                              GradientRing(
-                                value: lifeScore,
-                                label: '${(lifeScore * 100).toInt()}',
-                              ),
-                              const SizedBox(height: 8),
-                              const Text('Life score'),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: GlassCard(
-                          child: Column(
-                            children: [
-                              GradientRing(
-                                value: calProgress,
-                                label: '${(calProgress * 100).toInt()}%',
-                                gradient: const LinearGradient(
-                                  colors: [AppColors.accentAmber, AppColors.accentPink],
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              const Text('Food today'),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  const _SectionTitle('Today\'s habits'),
-                  const SizedBox(height: 8),
-                  if (habits.isEmpty)
-                    const _EmptyHint('No habits yet. Add them in the Habits tab!')
-                  else
-                    _HabitRow(
-                      habits: habits,
-                      metToday: (h) =>
-                          ref.read(habitTrackerProvider.notifier).isMetOnDate(h, now),
-                    ),
-                  const SizedBox(height: 12),
-                  GlassCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: const [
-                            Text('Calories',
-                                style: TextStyle(fontWeight: FontWeight.w600)),
-                            Text('+ Log food',
-                                style: TextStyle(color: AppColors.accentAmber)),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          '$todayCalories',
-                          style: const TextStyle(
-                            fontSize: 36,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const Text('of 2,000 kcal'),
-                        const SizedBox(height: 12),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: LinearProgressIndicator(
-                            minHeight: 8,
-                            value: calProgress,
-                            color: AppColors.accentAmber,
-                            backgroundColor: Colors.white10,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  const _SectionTitle('Quick access'),
-                  const SizedBox(height: 8),
-                  _QuickAccessGrid(
-                    noteCount: notes.length,
-                    taskCount: ref.watch(plannerTasksProvider).length,
-                    workoutMins: workoutMins,
-                    reelCount: reels.length,
-                  ),
-                  const SizedBox(height: 12),
-                  const _SectionTitle('Saved reels'),
-                  const SizedBox(height: 8),
-                  if (reels.isEmpty)
-                    const _EmptyHint('No reels saved yet. Save one in the Life tab!')
-                  else
-                    _ReelRow(reels: reels.take(6).toList()),
-                  const SizedBox(height: 24),
-                ],
+                ),
               ),
             ),
-          ),
-        ],
+            if (habits.isNotEmpty)
+              SliverPadding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                sliver: SliverToBoxAdapter(
+                  child: AnimatedListItem(
+                    index: 1,
+                    child: _HabitSummary(
+                      habits: habits,
+                      metHabits: metHabits,
+                      habitNotifier: habitN,
+                      now: now,
+                    ),
+                  ),
+                ),
+              ),
+            const SliverToBoxAdapter(child: SizedBox(height: 20)),
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              sliver: SliverToBoxAdapter(
+                child: AnimatedListItem(
+                  index: 2,
+                  child: _CalorieHeroCard(
+                    remaining: remaining,
+                    consumed: todayCalories,
+                    goal: goals.calories,
+                  ),
+                ),
+              ),
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: 12)),
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              sliver: SliverToBoxAdapter(
+                child: AnimatedListItem(
+                  index: 3,
+                  child: _MetricCard(
+                    label: 'Movement',
+                    value: '$workoutMins',
+                    unit: 'min',
+                    goal: 30,
+                    progress: (workoutMins / 30).clamp(0.0, 1.0),
+                  ),
+                ),
+              ),
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: 32)),
+          ],
+        ),
       ),
     );
   }
 }
 
 class _Header extends StatelessWidget {
-  const _Header();
+  const _Header({required this.habitsMet, required this.totalHabits});
+  final int habitsMet;
+  final int totalHabits;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textMuted = isDark ? DesignTokens.textMutedDark : DesignTokens.textMutedLight;
+    final okColor = isDark ? DesignTokens.okTextDark : DesignTokens.okTextLight;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Good ${greeting()}',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color.fromRGBO(240, 238, 255, 0.55),
-                  ),
+        Text(
+          'Good ${greeting()}',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: textMuted,
+                fontSize: 14,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Steady',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontSize: 32,
+                letterSpacing: -1.5,
+              ),
+        ),
+        if (totalHabits > 0) ...[
+          const SizedBox(height: 8),
+          AnimatedSwitcher(
+            duration: SteadyAnimations.normal,
+            transitionBuilder: (child, animation) {
+              return FadeTransition(
+                opacity: animation,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.3),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: child,
+                ),
+              );
+            },
+            child: Text(
+              '$habitsMet of $totalHabits habits done',
+              key: ValueKey<int>(habitsMet),
+              style: TextStyle(
+                color: habitsMet == totalHabits ? okColor : textMuted,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-            const SizedBox(height: 4),
-            Text('Steady', style: Theme.of(context).textTheme.headlineSmall),
-          ],
-        ),
-        const CircleAvatar(
-          backgroundColor: AppColors.accentPurple,
-          child: Icon(Icons.person, color: Colors.white),
-        ),
+          ),
+        ],
       ],
     );
   }
@@ -259,287 +165,247 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _AiBriefingCard extends StatelessWidget {
-  const _AiBriefingCard({required this.text, required this.loading});
-  final String text;
-  final bool loading;
+class _HabitSummary extends StatelessWidget {
+  const _HabitSummary({
+    required this.habits,
+    required this.metHabits,
+    required this.habitNotifier,
+    required this.now,
+  });
+
+  final List<Habit> habits;
+  final int metHabits;
+  final HabitTrackerNotifier habitNotifier;
+  final DateTime now;
 
   @override
   Widget build(BuildContext context) {
-    return GlassCard(
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final border = isDark ? DesignTokens.borderDefaultDark : DesignTokens.borderDefaultLight;
+    final bg = isDark ? DesignTokens.bgSurfaceDark : DesignTokens.bgSurfaceLight;
+    final okColor = isDark ? DesignTokens.okTextDark : DesignTokens.okTextLight;
+    final textSecondary = isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Habits',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: habits.take(6).toList().asMap().entries.map((entry) {
+            final i = entry.key;
+            final habit = entry.value;
+            final met = habitNotifier.isMetOnDate(habit, now);
+            return AnimatedListItem(
+              index: i,
+              slideOffset: const Offset(0, 8),
+              child: GestureDetector(
+                onTap: () {
+                  // Navigate to habits tab
+                },
+                child: AnimatedContainer(
+                  duration: SteadyAnimations.normal,
+                  curve: SteadyAnimations.easeOut,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: met
+                        ? (isDark
+                                ? DesignTokens.accentActiveDark
+                                : DesignTokens.accentActiveLight)
+                            .withValues(alpha: 0.3)
+                        : bg,
+                    borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+                    border: Border.all(
+                      color: met
+                          ? (isDark
+                              ? DesignTokens.accentActiveDark
+                              : DesignTokens.accentActiveLight)
+                          : border,
+                      width: DesignTokens.borderWidthDefault,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        habit.emoji,
+                        style: const TextStyle(fontSize: 18),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        habit.name,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: met ? textSecondary : Theme.of(context).textTheme.bodyMedium?.color,
+                        ),
+                      ),
+                      if (met) ...[
+                        const SizedBox(width: 6),
+                        Icon(
+                          LucideIcons.check,
+                          size: 14,
+                          color: okColor,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+}
+
+class _CalorieHeroCard extends StatelessWidget {
+  const _CalorieHeroCard({
+    required this.remaining,
+    required this.consumed,
+    required this.goal,
+  });
+
+  final int remaining;
+  final int consumed;
+  final int goal;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = isDark ? DesignTokens.textPrimaryDark : DesignTokens.textPrimaryLight;
+    final textMuted = isDark ? DesignTokens.textMutedDark : DesignTokens.textMutedLight;
+    final accent = isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight;
+    final border = isDark ? DesignTokens.borderDefaultDark : DesignTokens.borderDefaultLight;
+    final progress = goal > 0 ? (consumed / goal).clamp(0.0, 1.0) : 0.0;
+
+    return SteadyCard(
+      padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const Icon(Icons.auto_awesome,
-                  size: 14, color: AppColors.accentPurple),
-              const SizedBox(width: 6),
-              const Text(
-                'STEADY AI · Daily briefing',
-                style: TextStyle(
-                  fontSize: 11,
-                  letterSpacing: 1.2,
-                  color: AppColors.accentPurple,
-                ),
-              ),
-              if (loading) ...[
-                const SizedBox(width: 8),
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ],
-            ],
+          Text(
+            '$remaining kcal',
+            style: TextStyle(
+              fontSize: 40,
+              fontWeight: FontWeight.w800,
+              color: textPrimary,
+              letterSpacing: -1,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            'remaining',
+            style: TextStyle(fontSize: 14, color: textMuted),
+          ),
+          const SizedBox(height: 16),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: TweenAnimationBuilder<double>(
+              tween: Tween<double>(begin: 0, end: progress),
+              duration: SteadyAnimations.slow,
+              curve: SteadyAnimations.easeOut,
+              builder: (context, animatedProgress, _) {
+                return LinearProgressIndicator(
+                  minHeight: 10,
+                  value: animatedProgress,
+                  color: accent,
+                  backgroundColor: border,
+                );
+              },
+            ),
           ),
           const SizedBox(height: 10),
-          Text(text.isEmpty ? 'Generating your daily briefing...' : text),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '$consumed consumed',
+                style: TextStyle(fontSize: 12, color: textMuted),
+              ),
+              Text(
+                '$goal goal',
+                style: TextStyle(fontSize: 12, color: textMuted),
+              ),
+            ],
+          ),
         ],
       ),
     );
   }
 }
 
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.title);
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(title, style: Theme.of(context).textTheme.titleMedium);
-  }
-}
-
-class _HabitRow extends StatelessWidget {
-  const _HabitRow({required this.habits, required this.metToday});
-  final List<Habit> habits;
-  final bool Function(Habit) metToday;
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: habits.map((habit) {
-          final completedToday = metToday(habit);
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GlassCard(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(
-                children: [
-                  Text('${habit.emoji} ${habit.name}'),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${habit.currentStreak}🔥',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.accentAmber,
-                    ),
-                  ),
-                  if (completedToday)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 4),
-                      child: Icon(Icons.check_circle,
-                          size: 14, color: AppColors.accentTeal),
-                    ),
-                ],
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-}
-
-class _QuickAccessGrid extends StatelessWidget {
-  const _QuickAccessGrid({
-    required this.noteCount,
-    required this.taskCount,
-    required this.workoutMins,
-    required this.reelCount,
-  });
-  final int noteCount;
-  final int taskCount;
-  final int workoutMins;
-  final int reelCount;
-
-  @override
-  Widget build(BuildContext context) {
-    final cards = [
-      ('Notes', '$noteCount saved'),
-      ('Workout', '$workoutMins min today'),
-      ('Planner', '$taskCount tasks'),
-      ('Reels', '$reelCount saved'),
-    ];
-    return GridView.builder(
-      itemCount: cards.length,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        childAspectRatio: 1.6,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-      ),
-      itemBuilder: (context, index) {
-        final card = cards[index];
-        return GlassCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(card.$1,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontSize: 14)),
-              const SizedBox(height: 6),
-              Text(card.$2,
-                  style: const TextStyle(
-                      color: Colors.white54, fontSize: 12)),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ReelRow extends StatelessWidget {
-  const _ReelRow({required this.reels});
-  final List<SavedReel> reels;
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: reels.map((reel) {
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GlassCard(
-              padding: const EdgeInsets.all(14),
-              child: SizedBox(
-                width: 120,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Icon(Icons.play_arrow, color: AppColors.accentPink),
-                    const SizedBox(height: 4),
-                    Text(
-                      reel.caption.isEmpty ? 'Reel' : reel.caption,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    const SizedBox(height: 4),
-                    Wrap(
-                      spacing: 4,
-                      children: reel.aiTags
-                          .take(2)
-                          .map((t) => Chip(
-                                label: Text(t, style: const TextStyle(fontSize: 10)),
-                                visualDensity: VisualDensity.compact,
-                                padding: EdgeInsets.zero,
-                                backgroundColor:
-                                    AppColors.accentPink.withValues(alpha: 0.15),
-                                side: BorderSide.none,
-                              ))
-                          .toList(),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-}
-
-class _AiModelLine extends StatelessWidget {
-  const _AiModelLine(
-    this.async, {
-    required this.onRefresh,
-    required this.onRepairDownload,
+class _MetricCard extends StatelessWidget {
+  const _MetricCard({
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.goal,
+    required this.progress,
   });
 
-  final AsyncValue<AiModelUiStatus> async;
-  final VoidCallback onRefresh;
-  final VoidCallback onRepairDownload;
+  final String label;
+  final String value;
+  final String unit;
+  final int goal;
+  final double progress;
 
   @override
   Widget build(BuildContext context) {
-    return async.when(
-      data: (s) => GlassCard(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textSecondary = isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight;
+    final border = isDark ? DesignTokens.borderDefaultDark : DesignTokens.borderDefaultLight;
+
+    return SteadyCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    s.readyToRun
-                        ? Icons.smart_toy_outlined
-                        : Icons.cloud_off_outlined,
-                    size: 20,
-                    color: s.readyToRun
-                        ? Colors.greenAccent
-                        : Colors.amberAccent,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      s.subtitle,
-                      style: const TextStyle(fontSize: 13, height: 1.35),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Refresh model status',
-                    icon: const Icon(Icons.refresh, size: 20),
-                    onPressed: onRefresh,
-                  ),
-                ],
-              ),
-              if (!s.readyToRun) ...[
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: onRepairDownload,
-                    icon: const Icon(Icons.downloading, size: 18),
-                    label: const Text(
-                      'Clear install & open download (~2.6 GB)',
-                    ),
-                  ),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: textSecondary,
                 ),
-              ],
+              ),
+              Text(
+                '$value / $goal $unit',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: textSecondary.withValues(alpha: 0.8),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ],
           ),
-        ),
-      ),
-      loading: () => const SizedBox.shrink(),
-      error: (_, _) => const SizedBox.shrink(),
-    );
-  }
-}
-
-class _EmptyHint extends StatelessWidget {
-  const _EmptyHint(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Text(text, style: const TextStyle(color: Colors.white54)),
+          const SizedBox(height: 12),
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: progress),
+            duration: SteadyAnimations.slow,
+            curve: SteadyAnimations.easeOut,
+            builder: (context, animatedProgress, _) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(DesignTokens.progressBarBorderRadiusCalorie),
+                child: LinearProgressIndicator(
+                  minHeight: DesignTokens.progressBarHeightCalorie,
+                  value: animatedProgress,
+                  color: isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight,
+                  backgroundColor: border,
+                ),
+              );
+            },
+          ),
+        ],
       ),
     );
   }

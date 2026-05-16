@@ -1,10 +1,6 @@
-import 'dart:convert';
-
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../core/ai/gemma_service.dart';
 import '../../core/db/database.dart';
 import '../../features/habits/habit_tracker_notifier.dart';
 import '../models/models.dart';
@@ -17,65 +13,139 @@ const _uuid = Uuid();
 final habitsProvider = Provider<List<Habit>>(
   (ref) => ref.watch(habitTrackerProvider).habits,
 );
-final caloriesProvider = NotifierProvider<CaloriesNotifier, List<CalorieEntry>>(CaloriesNotifier.new);
-final workoutsProvider = NotifierProvider<WorkoutsNotifier, List<WorkoutEntry>>(WorkoutsNotifier.new);
-final notesProvider = NotifierProvider<NotesNotifier, List<NoteItem>>(NotesNotifier.new);
-final reelsProvider = NotifierProvider<ReelsNotifier, List<SavedReel>>(ReelsNotifier.new);
-final plannerTasksProvider = NotifierProvider<PlannerTasksNotifier, List<String>>(PlannerTasksNotifier.new);
+
+final foodEntriesProvider =
+    NotifierProvider<FoodNotifier, List<FoodEntry>>(FoodNotifier.new);
+
+final workoutsProvider =
+    NotifierProvider<WorkoutsNotifier, List<WorkoutEntry>>(WorkoutsNotifier.new);
+
+// Select-based providers so DashboardScreen rebuilds only when today's values change.
+final todayFoodEntriesProvider = Provider<List<FoodEntry>>((ref) {
+  final now = DateTime.now();
+  return ref.watch(foodEntriesProvider).where((e) {
+    return e.timestamp.year == now.year &&
+        e.timestamp.month == now.month &&
+        e.timestamp.day == now.day;
+  }).toList();
+});
+
+final todayCaloriesProvider = Provider<int>((ref) {
+  return ref.watch(todayFoodEntriesProvider)
+      .fold<int>(0, (s, e) => s + e.totalCalories);
+});
+
+final todayProteinProvider = Provider<double>((ref) {
+  return ref.watch(todayFoodEntriesProvider)
+      .fold<double>(0, (s, e) => s + e.totalProteinG);
+});
+
+final todayCarbsProvider = Provider<double>((ref) {
+  return ref.watch(todayFoodEntriesProvider)
+      .fold<double>(0, (s, e) => s + e.totalCarbsG);
+});
+
+final todayFatProvider = Provider<double>((ref) {
+  return ref.watch(todayFoodEntriesProvider)
+      .fold<double>(0, (s, e) => s + e.totalFatG);
+});
+
+final todayWorkoutMinutesProvider = Provider<int>((ref) {
+  final now = DateTime.now();
+  return ref.watch(workoutsProvider)
+      .where((e) =>
+          e.timestamp.year == now.year &&
+          e.timestamp.month == now.month &&
+          e.timestamp.day == now.day)
+      .fold<int>(0, (s, e) => s + e.durationMin);
+});
 
 // ---------------------------------------------------------------------------
-// Calories
+// Food Entries
 // ---------------------------------------------------------------------------
-class CaloriesNotifier extends Notifier<List<CalorieEntry>> {
+class FoodNotifier extends Notifier<List<FoodEntry>> {
   late LocalDatabase _db;
 
   @override
-  List<CalorieEntry> build() {
+  List<FoodEntry> build() {
     _db = ref.read(databaseProvider);
-    return _db.loadCalories();
+    return _db.loadFoodEntries();
   }
 
-  Future<void> _save() => _db.saveCalories(state);
+  Future<void> _save() => _db.saveFoodEntries(state);
 
-  Future<void> logWithAi(String description) async {
-    String jsonString;
-    try {
-      jsonString = await ref.read(gemmaServiceProvider).analyzeFood(description);
-    } catch (e) {
-      debugPrint('AI food analysis error: $e');
-      jsonString = '{}';
-    }
-    final parsed = jsonDecode(jsonString) as Map<String, dynamic>? ?? {};
-    state = [
-      ...state,
-      CalorieEntry(
-        id: _uuid.v4(),
-        description: description,
-        calories: (parsed['calories'] as num?)?.toInt() ?? 0,
-        protein: (parsed['protein_g'] as num?)?.toInt() ?? 0,
-        carbs: (parsed['carbs_g'] as num?)?.toInt() ?? 0,
-        fat: (parsed['fat_g'] as num?)?.toInt() ?? 0,
-        timestamp: DateTime.now(),
-      ),
-    ];
+  Future<void> logEntry(FoodEntry entry) async {
+    state = [...state, entry];
     await _save();
   }
 
-  Future<void> addManual(int calories, int protein, int carbs, int fat, String description) async {
-    state = [...state, CalorieEntry(
+  Future<void> logWithAi(FoodAnalysisResult result, {
+    required MealType mealType,
+    String? photoPath,
+  }) async {
+    final entry = result.toFoodEntry(
       id: _uuid.v4(),
-      description: description,
-      calories: calories,
-      protein: protein,
-      carbs: carbs,
-      fat: fat,
+      mealType: mealType,
+      photoPath: photoPath,
       timestamp: DateTime.now(),
-    )];
+    );
+    state = [...state, entry];
+    await _save();
+  }
+
+  Future<void> addManual({
+    required MealType mealType,
+    required String description,
+    required int calories,
+    int protein = 0,
+    int carbs = 0,
+    int fat = 0,
+  }) async {
+    final entry = FoodEntry(
+      id: _uuid.v4(),
+      mealType: mealType,
+      photoPath: null,
+      totalCalories: calories,
+      totalProteinG: protein.toDouble(),
+      totalCarbsG: carbs.toDouble(),
+      totalFatG: fat.toDouble(),
+      overallConfidence: ConfidenceLevel.high,
+      confidenceNote: null,
+      items: [
+        FoodItem(
+          name: description,
+          estimatedWeightG: 0,
+          calories: calories,
+          proteinG: protein.toDouble(),
+          carbsG: carbs.toDouble(),
+          fatG: fat.toDouble(),
+          confidence: ConfidenceLevel.high,
+          cookingMethod: 'unknown',
+          portionReference: 'manual entry',
+        ),
+      ],
+      timestamp: DateTime.now(),
+      isManuallyEntered: true,
+    );
+    state = [...state, entry];
     await _save();
   }
 
   Future<void> deleteEntry(String id) async {
     state = state.where((e) => e.id != id).toList();
+    await _save();
+  }
+
+  Future<void> updateEntry(FoodEntry entry) async {
+    state = state.map((e) => e.id == entry.id ? entry : e).toList();
+    await _save();
+  }
+
+  Future<void> updateMealType(String entryId, MealType newType) async {
+    final index = state.indexWhere((e) => e.id == entryId);
+    if (index == -1) return;
+    final updated = state[index].copyWith(mealType: newType);
+    state = [...state.sublist(0, index), updated, ...state.sublist(index + 1)];
     await _save();
   }
 }
@@ -108,110 +178,6 @@ class WorkoutsNotifier extends Notifier<List<WorkoutEntry>> {
 
   Future<void> deleteEntry(String id) async {
     state = state.where((e) => e.id != id).toList();
-    await _save();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Notes
-// ---------------------------------------------------------------------------
-class NotesNotifier extends Notifier<List<NoteItem>> {
-  late LocalDatabase _db;
-
-  @override
-  List<NoteItem> build() {
-    _db = ref.read(databaseProvider);
-    return _db.loadNotes();
-  }
-
-  Future<void> _save() => _db.saveNotes(state);
-
-  Future<void> addNote(String title, String body) async {
-    String? summary;
-    try {
-      summary = await ref.read(gemmaServiceProvider).ask('Summarize this note in one sentence: $body');
-    } catch (e) {
-      debugPrint('AI summary error: $e');
-    }
-    state = [...state, NoteItem(
-      id: _uuid.v4(),
-      title: title,
-      body: body,
-      aiSummary: summary,
-      createdAt: DateTime.now(),
-    )];
-    await _save();
-  }
-
-  Future<void> deleteNote(String id) async {
-    state = state.where((n) => n.id != id).toList();
-    await _save();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Reels
-// ---------------------------------------------------------------------------
-class ReelsNotifier extends Notifier<List<SavedReel>> {
-  late LocalDatabase _db;
-
-  @override
-  List<SavedReel> build() {
-    _db = ref.read(databaseProvider);
-    return _db.loadReels();
-  }
-
-  Future<void> _save() => _db.saveReels(state);
-
-  Future<void> addReel(String url, String caption) async {
-    List<String> tags = [];
-    try {
-      final tagsRaw = await ref.read(gemmaServiceProvider).tagReel(caption);
-      final parsed = jsonDecode(tagsRaw);
-      if (parsed is List) {
-        tags = parsed.map((item) => item.toString()).toList();
-      }
-    } catch (e) {
-      debugPrint('AI tagging error: $e');
-      tags = ['inspo'];
-    }
-    state = [...state, SavedReel(
-      id: _uuid.v4(),
-      url: url,
-      caption: caption,
-      aiTags: tags,
-      savedAt: DateTime.now(),
-    )];
-    await _save();
-  }
-
-  Future<void> deleteReel(String id) async {
-    state = state.where((r) => r.id != id).toList();
-    await _save();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Planner Tasks
-// ---------------------------------------------------------------------------
-class PlannerTasksNotifier extends Notifier<List<String>> {
-  late LocalDatabase _db;
-
-  @override
-  List<String> build() {
-    _db = ref.read(databaseProvider);
-    return _db.loadPlannerTasks();
-  }
-
-  Future<void> _save() => _db.savePlannerTasks(state);
-
-  Future<void> addTask(String task) async {
-    state = [...state, task];
-    await _save();
-  }
-
-  Future<void> removeTask(String task) async {
-    state = state.where((t) => t != task).toList();
     await _save();
   }
 }

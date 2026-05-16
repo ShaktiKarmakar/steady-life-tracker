@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../core/theme/app_theme.dart';
+import '../../../core/design_system/design_tokens.dart';
 import '../../../shared/models/models.dart';
 import '../../../shared/widgets/gradient_ring.dart';
 import '../habit_formatters.dart';
@@ -51,7 +50,10 @@ class _HabitDetailScreenState extends ConsumerState<HabitDetailScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text('${habit.emoji} ${habit.name}'),
-        backgroundColor: AppColors.bgSecondary,
+        backgroundColor: Theme.of(context).appBarTheme.backgroundColor ??
+            (Theme.of(context).brightness == Brightness.dark
+                ? DesignTokens.bgSurfaceDark
+                : DesignTokens.bgSurfaceLight),
       ),
       body: switch (habit.kind) {
         HabitMeasureKind.checkbox => _CheckboxBody(
@@ -166,7 +168,13 @@ class _CheckboxBody extends ConsumerWidget {
                 child: Icon(
                   met ? Icons.check : Icons.radio_button_unchecked,
                   size: 100,
-                  color: met ? AppColors.accentTeal : Colors.white54,
+                  color: met
+                      ? (Theme.of(context).brightness == Brightness.dark
+                          ? DesignTokens.okTextDark
+                          : DesignTokens.okTextLight)
+                      : (Theme.of(context).brightness == Brightness.dark
+                          ? DesignTokens.textMutedDark
+                          : DesignTokens.textMutedLight),
                 ),
               ),
             ),
@@ -241,7 +249,12 @@ class _CountBodyState extends ConsumerState<_CountBody> {
               value: frac,
               label: '$_count',
               gradient: LinearGradient(
-                colors: [widget.habit.accentColorValue, AppColors.accentPink],
+                colors: [
+                  widget.habit.accentColorValue,
+                  Theme.of(context).brightness == Brightness.dark
+                      ? DesignTokens.textSecondaryDark
+                      : DesignTokens.textSecondaryLight
+                ],
               ),
             ),
           ),
@@ -372,62 +385,48 @@ class _StopwatchBody extends ConsumerStatefulWidget {
 }
 
 class _StopwatchBodyState extends ConsumerState<_StopwatchBody> {
-  bool _running = false;
-  Ticker? _ticker;
-  Duration _session = Duration.zero;
-  DateTime? _startedAt;
+  TimerSessionState get _timer =>
+      ref.read(habitTimerProvider.select((m) => m[widget.habit.id])) ??
+      const TimerSessionState();
 
   @override
   void dispose() {
-    if (_running && _startedAt != null) {
-      _session += DateTime.now().difference(_startedAt!);
-    }
-    _ticker?.dispose();
-    final sec = _session.inMilliseconds / 1000.0;
-    if (sec > 0) {
-      final n = ref.read(habitTrackerProvider.notifier);
-      unawaited(n.addTimerSeconds(widget.habit, widget.day, sec));
+    final notifier = ref.read(habitTimerProvider.notifier);
+    final elapsed = notifier.flushAndReset(widget.habit.id);
+    if (elapsed > 0) {
+      unawaited(
+        ref.read(habitTrackerProvider.notifier)
+            .addTimerSeconds(widget.habit, widget.day, elapsed),
+      );
     }
     super.dispose();
   }
 
   void _toggle() {
-    if (_running) {
-      _ticker?.dispose();
-      _ticker = null;
-      if (_startedAt != null) {
-        _session += DateTime.now().difference(_startedAt!);
+    final notifier = ref.read(habitTimerProvider.notifier);
+    if (_timer.running) {
+      notifier.pause(widget.habit.id);
+      final elapsed = notifier.flushAndReset(widget.habit.id);
+      if (elapsed > 0) {
+        unawaited(
+          ref.read(habitTrackerProvider.notifier)
+              .addTimerSeconds(widget.habit, widget.day, elapsed),
+        );
       }
-      _running = false;
-      _startedAt = null;
-      unawaited(_flushSession());
     } else {
-      _running = true;
-      _startedAt = DateTime.now();
-      _ticker = Ticker((_) => setState(() {}))..start();
+      notifier.start(widget.habit.id);
     }
-    setState(() {});
-  }
-
-  Future<void> _flushSession() async {
-    if (_session.inMilliseconds <= 0) return;
-    final sec = _session.inMilliseconds / 1000.0;
-    await ref.read(habitTrackerProvider.notifier).addTimerSeconds(widget.habit, widget.day, sec);
-    _session = Duration.zero;
-  }
-
-  Duration get _displayElapsed {
-    var d = _session;
-    if (_running && _startedAt != null) {
-      d += DateTime.now().difference(_startedAt!);
-    }
-    return d;
   }
 
   @override
   Widget build(BuildContext context) {
+    final timer = ref.watch(
+          habitTimerProvider.select((m) => m[widget.habit.id]),
+        ) ??
+        const TimerSessionState();
     final goal = widget.habit.goalSeconds.toDouble();
-    final total = widget.amount + _displayElapsed.inMilliseconds / 1000.0;
+    final elapsed = timer.elapsedSec;
+    final total = widget.amount + elapsed;
     final frac = goal > 0 ? (total / goal).clamp(0.0, 1.0) : 0.0;
 
     return Padding(
@@ -439,7 +438,12 @@ class _StopwatchBodyState extends ConsumerState<_StopwatchBody> {
             value: frac,
             label: formatDurationSeconds(total),
             gradient: LinearGradient(
-              colors: [widget.habit.accentColorValue, AppColors.accentPink],
+              colors: [
+                widget.habit.accentColorValue,
+                Theme.of(context).brightness == Brightness.dark
+                    ? DesignTokens.textSecondaryDark
+                    : DesignTokens.textSecondaryLight
+              ],
             ),
           ),
           const SizedBox(height: 24),
@@ -453,8 +457,8 @@ class _StopwatchBodyState extends ConsumerState<_StopwatchBody> {
             children: [
               FilledButton.icon(
                 onPressed: _toggle,
-                icon: Icon(_running ? Icons.pause : Icons.play_arrow),
-                label: Text(_running ? 'Pause' : 'Start'),
+                icon: Icon(timer.running ? Icons.pause : Icons.play_arrow),
+                label: Text(timer.running ? 'Pause' : 'Start'),
               ),
             ],
           ),
@@ -486,71 +490,55 @@ class _CountdownBody extends ConsumerStatefulWidget {
 }
 
 class _CountdownBodyState extends ConsumerState<_CountdownBody> {
-  bool _running = false;
-  Timer? _timer;
-  int _remainingSec = 0;
-  late int _initialGoal;
-
-  @override
-  void initState() {
-    super.initState();
-    _initialGoal = widget.habit.goalSeconds;
-    _remainingSec = _initialGoal;
-  }
-
   @override
   void dispose() {
-    _timer?.cancel();
+    final notifier = ref.read(habitTimerProvider.notifier);
+    final elapsed = notifier.flushAndReset(widget.habit.id);
+    final goal = widget.habit.goalSeconds.toDouble();
+    if (elapsed > 0) {
+      unawaited(
+        ref.read(habitTrackerProvider.notifier)
+            .addTimerSeconds(widget.habit, widget.day, elapsed.clamp(0, goal)),
+      );
+    }
     super.dispose();
   }
 
   void _start() {
-    if (_running) return;
-    setState(() {
-      _remainingSec = _initialGoal;
-      _running = true;
-    });
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (_remainingSec <= 1) {
-        t.cancel();
-        setState(() {
-          _running = false;
-          _remainingSec = _initialGoal;
-        });
-        unawaited(_onSessionComplete());
-        return;
-      }
-      setState(() => _remainingSec--);
-    });
-  }
-
-  Future<void> _onSessionComplete() async {
-    await ref
-        .read(habitTrackerProvider.notifier)
-        .addTimerSeconds(widget.habit, widget.day, _initialGoal.toDouble());
+    final notifier = ref.read(habitTimerProvider.notifier);
+    notifier.reset(widget.habit.id);
+    notifier.start(widget.habit.id);
   }
 
   void _reset() {
-    _timer?.cancel();
-    _timer = null;
-    setState(() {
-      _running = false;
-      _remainingSec = _initialGoal;
-    });
+    ref.read(habitTimerProvider.notifier).reset(widget.habit.id);
   }
 
   @override
   Widget build(BuildContext context) {
+    final timer = ref.watch(
+          habitTimerProvider.select((m) => m[widget.habit.id]),
+        ) ??
+        const TimerSessionState();
     final goal = widget.habit.goalSeconds.toDouble();
+    final elapsed = timer.elapsedSec;
+    final remaining = (goal - elapsed).clamp(0.0, goal);
+    final frac = goal > 0 ? (elapsed / goal).clamp(0.0, 1.0) : 0.0;
     final dayTotal = widget.amount;
-    final frac = goal > 0 ? (dayTotal / goal).clamp(0.0, 1.0) : 0.0;
-    final ringFrac = _running
-        ? ((_initialGoal - _remainingSec) / _initialGoal).clamp(0.0, 1.0)
-        : frac;
-    final centerLabel = _running
-        ? _remainingSec.toDouble()
-        : dayTotal;
+
+    // Auto-complete when countdown reaches zero.
+    if (timer.running && elapsed >= goal) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final notifier = ref.read(habitTimerProvider.notifier);
+        final logged = notifier.flushAndReset(widget.habit.id);
+        if (logged > 0) {
+          unawaited(
+            ref.read(habitTrackerProvider.notifier)
+                .addTimerSeconds(widget.habit, widget.day, logged.clamp(0, goal)),
+          );
+        }
+      });
+    }
 
     return Padding(
       padding: const EdgeInsets.all(20),
@@ -568,10 +556,15 @@ class _CountdownBodyState extends ConsumerState<_CountdownBody> {
                 ),
               ),
               GradientRing(
-                value: ringFrac,
-                label: formatDurationSeconds(centerLabel),
+                value: frac,
+                label: formatDurationSeconds(remaining),
                 gradient: LinearGradient(
-                  colors: [widget.habit.accentColorValue, AppColors.accentTeal],
+                  colors: [
+                  widget.habit.accentColorValue,
+                  Theme.of(context).brightness == Brightness.dark
+                      ? DesignTokens.textSecondaryDark
+                      : DesignTokens.textSecondaryLight
+                ],
                 ),
               ),
             ],
@@ -588,7 +581,7 @@ class _CountdownBodyState extends ConsumerState<_CountdownBody> {
               OutlinedButton(onPressed: _reset, child: const Text('Reset')),
               const SizedBox(width: 12),
               FilledButton.icon(
-                onPressed: _running ? null : _start,
+                onPressed: timer.running ? null : _start,
                 icon: const Icon(Icons.play_arrow),
                 label: const Text('Start'),
               ),

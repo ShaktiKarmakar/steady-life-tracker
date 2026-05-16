@@ -172,6 +172,8 @@ class Habit {
     this.aiNudge,
     this.isFavorite = false,
     this.note,
+    this.reminderEnabled = false,
+    this.reminderTime,
   });
 
   final String id;
@@ -204,6 +206,12 @@ class Habit {
   final String? aiNudge;
   final bool isFavorite;
   final String? note;
+
+  /// Whether a daily local notification is scheduled for this habit.
+  final bool reminderEnabled;
+
+  /// "HH:mm" (24h) when the reminder should fire. Requires [reminderEnabled] == true.
+  final String? reminderTime;
 
   Color get accentColorValue => Color(accentColor);
 
@@ -242,6 +250,8 @@ class Habit {
         'aiNudge': aiNudge,
         'isFavorite': isFavorite,
         'note': note,
+        'reminderEnabled': reminderEnabled,
+        'reminderTime': reminderTime,
       };
 
   factory Habit.fromJson(Map<String, dynamic> json) {
@@ -278,6 +288,8 @@ class Habit {
       aiNudge: json['aiNudge'] as String?,
       isFavorite: json['isFavorite'] as bool? ?? false,
       note: json['note'] as String?,
+      reminderEnabled: json['reminderEnabled'] as bool? ?? false,
+      reminderTime: json['reminderTime'] as String?,
     );
   }
 
@@ -300,6 +312,8 @@ class Habit {
     String? aiNudge,
     bool? isFavorite,
     String? note,
+    bool? reminderEnabled,
+    String? reminderTime,
   }) =>
       Habit(
         id: id ?? this.id,
@@ -320,6 +334,8 @@ class Habit {
         aiNudge: aiNudge ?? this.aiNudge,
         isFavorite: isFavorite ?? this.isFavorite,
         note: note ?? this.note,
+        reminderEnabled: reminderEnabled ?? this.reminderEnabled,
+        reminderTime: reminderTime ?? this.reminderTime,
       );
 }
 
@@ -359,6 +375,16 @@ class HabitTrackerBundle {
           json['profile'] as Map<String, dynamic>?,
         ),
       );
+
+  /// Builds an in-memory index for O(1) lookups:
+  /// dateKey → habitId → HabitDayProgress.
+  Map<String, Map<String, HabitDayProgress>> buildProgressIndex() {
+    final index = <String, Map<String, HabitDayProgress>>{};
+    for (final p in dayProgress) {
+      (index[p.dateKey] ??= {})[p.habitId] = p;
+    }
+    return index;
+  }
 }
 
 String dateKeyFrom(DateTime d) =>

@@ -1,11 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
-import '../../core/theme/app_theme.dart';
+import '../../../core/design_system/design_tokens.dart';
 import 'home/today_home_screen.dart';
-import 'list/habit_library_screen.dart';
-import 'profile/habit_profile_screen.dart';
-import 'settings/habit_settings_screen.dart';
 import 'statistics/habit_statistics_screen.dart';
 
 class HabitModuleShell extends ConsumerStatefulWidget {
@@ -15,56 +11,77 @@ class HabitModuleShell extends ConsumerStatefulWidget {
   ConsumerState<HabitModuleShell> createState() => _HabitModuleShellState();
 }
 
-class _HabitModuleShellState extends ConsumerState<HabitModuleShell> {
-  int _index = 0;
+class _HabitModuleShellState extends ConsumerState<HabitModuleShell>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? DesignTokens.bgSurfaceDark : DesignTokens.bgSurfaceLight;
+    final border = isDark ? DesignTokens.borderDefaultDark : DesignTokens.borderDefaultLight;
+    final textMuted = isDark ? DesignTokens.textMutedDark : DesignTokens.textMutedLight;
+    final textActive = isDark ? DesignTokens.textSecondaryDark : DesignTokens.textSecondaryLight;
+    final activeBg = isDark
+        ? DesignTokens.accentActiveDark.withValues(alpha: 0.5)
+        : DesignTokens.accentActiveLight.withValues(alpha: 0.8);
+
     return Scaffold(
-      backgroundColor: AppColors.bgPrimary,
-      body: IndexedStack(
-        index: _index,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      body: Column(
         children: [
-          TodayHomeScreen(
-            onOpenProfile: () => setState(() => _index = 2),
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+              border: Border.all(
+                color: border,
+                width: DesignTokens.borderWidthDefault,
+              ),
+            ),
+            child: TabBar(
+              controller: _tabController,
+              indicator: BoxDecoration(
+                color: activeBg,
+                borderRadius: BorderRadius.circular(DesignTokens.radiusSm),
+              ),
+              labelColor: textActive,
+              unselectedLabelColor: textMuted,
+              labelStyle: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+              dividerColor: Colors.transparent,
+              tabs: const [
+                Tab(text: 'Today'),
+                Tab(text: 'Stats'),
+              ],
+            ),
           ),
-          const HabitStatisticsScreen(),
-          const HabitProfileScreen(),
-          const HabitLibraryScreen(),
-          const HabitSettingsScreen(),
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        height: 64,
-        backgroundColor: AppColors.bgSecondary.withValues(alpha: 0.95),
-        indicatorColor: AppColors.accentPurple.withValues(alpha: 0.25),
-        selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.today_outlined),
-            selectedIcon: Icon(Icons.today),
-            label: 'Home',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.bar_chart_outlined),
-            selectedIcon: Icon(Icons.bar_chart),
-            label: 'Statistics',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            selectedIcon: Icon(Icons.person),
-            label: 'Profile',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.checklist_outlined),
-            selectedIcon: Icon(Icons.checklist),
-            label: 'List',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings),
-            label: 'Settings',
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                TodayHomeScreen(
+                  onOpenProfile: () {},
+                ),
+                const HabitStatisticsScreen(),
+              ],
+            ),
           ),
         ],
       ),

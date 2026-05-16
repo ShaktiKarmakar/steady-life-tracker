@@ -3,10 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/ai/gemma_service.dart';
 import 'core/ai/huggingface_config.dart';
+import 'core/ai/steady_tools.dart';
 import 'core/db/database.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
+import 'shared/providers/daily_health_sync_provider.dart';
+import 'shared/providers/theme_provider.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,32 +23,16 @@ Future<void> main() async {
 
   final gemmaProbe = GemmaService();
   await gemmaProbe.initialize();
-  var modelInstalled = false;
-  try {
-    modelInstalled = await gemmaProbe.isModelInstalled();
-  } catch (_) {}
 
-  final onboardingDone = db.onboardingComplete;
-  final skippedAiDownload = db.aiDownloadSkipped;
+  // Register all AI-callable tools (habits, tracking, settings, etc.)
+  registerAllSteadyTools();
 
-  // First launch → onboarding. Returning users without a model (who didn't skip) → onboarding
-  // so the AI download step is reachable (see OnboardingScreen._checkAlreadyDone).
-  final initialLocation = !onboardingDone
-      ? '/onboarding'
-      : (!modelInstalled && !skippedAiDownload)
-          ? '/onboarding'
-          : '/dashboard';
-
-  // Note: Weights + flutter_gemma metadata live in the app container. A full
-  // reinstall (new bundle id, `flutter install`, deleting the app, or some CI
-  // clean builds) wipes that — only hot reload / normal `flutter run` keeps data.
   runApp(
     ProviderScope(
       overrides: [
         // Same instance as above — databaseProvider must not create a second
         // LocalDatabase that never had initialize() (would crash notifiers).
         databaseProvider.overrideWithValue(db),
-        initialLocationProvider.overrideWithValue(initialLocation),
       ],
       child: const SteadyApp(),
     ),
@@ -58,10 +45,17 @@ class SteadyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(appRouterProvider);
+    final themeMode = ref.watch(themeModeProvider);
+
+    // Trigger silent daily Health sync once per day on app start.
+    ref.watch(dailyHealthSyncProvider);
+
     return MaterialApp.router(
       title: 'Steady',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
+      themeMode: themeMode,
+      theme: SteadyTheme.lightTheme,
+      darkTheme: SteadyTheme.darkTheme,
       routerConfig: router,
     );
   }

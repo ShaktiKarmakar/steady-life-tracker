@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/ai/gemma_service.dart';
 import '../../core/db/database.dart';
+import '../../core/notifications/notification_service.dart';
 import '../../shared/models/models.dart';
 
 final _uuid = Uuid();
@@ -21,6 +22,7 @@ class HabitTrackerState {
     required this.profile,
     this.filterStatus = HabitFilterStatus.all,
     this.filterTime = HabitFilterTime.all,
+    this.progressIndex = const {},
   });
 
   final List<Habit> habits;
@@ -29,12 +31,16 @@ class HabitTrackerState {
   final HabitFilterStatus filterStatus;
   final HabitFilterTime filterTime;
 
+  /// In-memory index: dateKey → habitId → HabitDayProgress for O(1) lookups.
+  final Map<String, Map<String, HabitDayProgress>> progressIndex;
+
   HabitTrackerState copyWith({
     List<Habit>? habits,
     List<HabitDayProgress>? dayProgress,
     HabitUserProfile? profile,
     HabitFilterStatus? filterStatus,
     HabitFilterTime? filterTime,
+    Map<String, Map<String, HabitDayProgress>>? progressIndex,
   }) =>
       HabitTrackerState(
         habits: habits ?? this.habits,
@@ -42,6 +48,7 @@ class HabitTrackerState {
         profile: profile ?? this.profile,
         filterStatus: filterStatus ?? this.filterStatus,
         filterTime: filterTime ?? this.filterTime,
+        progressIndex: progressIndex ?? this.progressIndex,
       );
 }
 
@@ -130,10 +137,13 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
       }
     }
 
+    final index = bundle.buildProgressIndex();
+
     return HabitTrackerState(
       habits: bundle.habits,
       dayProgress: bundle.dayProgress,
       profile: bundle.profile,
+      progressIndex: index,
     );
   }
 
@@ -171,11 +181,11 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
   }
 
   double progressFor(String habitId, String dateKey) {
-    final p = state.dayProgress.where(
-      (e) => e.habitId == habitId && e.dateKey == dateKey,
-    );
-    if (p.isEmpty) return 0;
-    return p.first.amount;
+    final dayMap = state.progressIndex[dateKey];
+    if (dayMap == null) return 0;
+    final p = dayMap[habitId];
+    if (p == null) return 0;
+    return p.amount;
   }
 
   bool isMetOnDay(Habit habit, String dateKey) {
@@ -236,6 +246,7 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
         habit.id.isEmpty ? habit.copyWith(id: _uuid.v4()) : habit;
     state = state.copyWith(habits: [...state.habits, h]);
     await _save();
+    await _syncNotification(h);
   }
 
   Future<void> updateHabit(Habit habit) async {
@@ -246,14 +257,36 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
       ],
     );
     await _save();
+    await _syncNotification(habit);
   }
 
   Future<void> deleteHabit(String id) async {
+    final nextHabits = state.habits.where((h) => h.id != id).toList();
+    final nextDayProgress = state.dayProgress.where((p) => p.habitId != id).toList();
+    // Rebuild index from the filtered list.
+    final nextIndex = <String, Map<String, HabitDayProgress>>{};
+    for (final p in nextDayProgress) {
+      (nextIndex[p.dateKey] ??= {})[p.habitId] = p;
+    }
     state = state.copyWith(
-      habits: state.habits.where((h) => h.id != id).toList(),
-      dayProgress: state.dayProgress.where((p) => p.habitId != id).toList(),
+      habits: nextHabits,
+      dayProgress: nextDayProgress,
+      progressIndex: nextIndex,
     );
     await _save();
+    await NotificationService.instance.cancelHabitReminder(id);
+  }
+
+  Future<void> _syncNotification(Habit habit) async {
+    if (habit.reminderEnabled && habit.reminderTime != null && habit.reminderTime!.isNotEmpty) {
+      await NotificationService.instance.scheduleHabitReminder(
+        habitId: habit.id,
+        title: habit.name,
+        time: habit.reminderTime!,
+      );
+    } else {
+      await NotificationService.instance.cancelHabitReminder(habit.id);
+    }
   }
 
   Future<void> setProfile(HabitUserProfile profile) async {
@@ -285,16 +318,11 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
       _ => newAmount.clamp(0, cap).toDouble(),
     };
 
-    final others =
-        state.dayProgress.where((p) => !(p.habitId == habit.id && p.dateKey == dateKey)).toList();
-
-    HabitDayProgress? existing;
-    for (final p in state.dayProgress) {
-      if (p.habitId == habit.id && p.dateKey == dateKey) {
-        existing = p;
-        break;
-      }
-    }
+    // Update the O(1) index.
+    final nextIndex =
+        Map<String, Map<String, HabitDayProgress>>.from(state.progressIndex);
+    final dayMap = Map<String, HabitDayProgress>.from(nextIndex[dateKey] ?? {});
+    final existing = dayMap[habit.id];
 
     final events = [...?existing?.events];
     if (delta != null || memo != null) {
@@ -307,21 +335,26 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
       );
     }
 
-    others.add(
-      HabitDayProgress(
-        habitId: habit.id,
-        dateKey: dateKey,
-        amount: trimmed,
-        events: events,
-        memo: memo ?? existing?.memo,
-      ),
+    final nextProgress = HabitDayProgress(
+      habitId: habit.id,
+      dateKey: dateKey,
+      amount: trimmed,
+      events: events,
+      memo: memo ?? existing?.memo,
     );
+
+    dayMap[habit.id] = nextProgress;
+    nextIndex[dateKey] = dayMap;
+
+    // Rebuild the list for serialization from the index.
+    final nextDayProgress =
+        nextIndex.values.expand((m) => m.values).toList();
 
     final nextHabits = [
       for (final h in state.habits)
         if (h.id == habit.id)
           () {
-            final s = _streaksForHabit(h, others);
+            final s = _streaksForHabit(h, nextDayProgress);
             return h.copyWith(
               currentStreak: s.$1,
               longestStreak: s.$2,
@@ -332,12 +365,16 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
           h,
     ];
 
-    state = state.copyWith(dayProgress: others, habits: nextHabits);
+    state = state.copyWith(
+      dayProgress: nextDayProgress,
+      habits: nextHabits,
+      progressIndex: nextIndex,
+    );
     await _save();
 
     final nowMet = isMetOnDay(habit, dateKey);
     if (requestNudgeIfNewlyMet && !wasMet && nowMet) {
-      await _maybeNudge(habit);
+      unawaited(_maybeNudge(habit));
     }
   }
 
@@ -346,8 +383,10 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
       final nudge = await ref
           .read(gemmaServiceProvider)
           .generateHabitNudge(habit.name, habit.currentStreak);
+      // Re-read current state so we don't overwrite concurrent changes.
+      final currentHabits = state.habits;
       final next = [
-        for (final h in state.habits)
+        for (final h in currentHabits)
           if (h.id == habit.id) h.copyWith(aiNudge: nudge) else h,
       ];
       state = state.copyWith(habits: next);
@@ -488,3 +527,109 @@ class HabitTrackerNotifier extends Notifier<HabitTrackerState> {
 
   DateTime _stripTime(DateTime d) => DateTime(d.year, d.month, d.day);
 }
+
+// ---------------------------------------------------------------------------
+// Timer session provider (stopwatch / countdown)
+// ---------------------------------------------------------------------------
+
+class TimerSessionState {
+  const TimerSessionState({
+    this.running = false,
+    this.accumulatedMs = 0,
+    this.startedAt,
+  });
+
+  final bool running;
+  final int accumulatedMs;
+  final DateTime? startedAt;
+
+  double get elapsedSec {
+    var ms = accumulatedMs;
+    if (running && startedAt != null) {
+      ms += DateTime.now().difference(startedAt!).inMilliseconds;
+    }
+    return ms / 1000.0;
+  }
+
+  TimerSessionState copyWith({
+    bool? running,
+    int? accumulatedMs,
+    DateTime? startedAt,
+  }) =>
+      TimerSessionState(
+        running: running ?? this.running,
+        accumulatedMs: accumulatedMs ?? this.accumulatedMs,
+        startedAt: startedAt ?? this.startedAt,
+      );
+}
+
+class HabitTimerNotifier extends Notifier<Map<String, TimerSessionState>> {
+  final _pulses = <String, Timer>{};
+
+  @override
+  Map<String, TimerSessionState> build() => {};
+
+  void start(String habitId) {
+    final current = state[habitId] ?? const TimerSessionState();
+    if (current.running) return;
+    state = {
+      ...state,
+      habitId: current.copyWith(running: true, startedAt: DateTime.now()),
+    };
+    _pulses[habitId]?.cancel();
+    _pulses[habitId] = Timer.periodic(const Duration(seconds: 1), (_) {
+      final s = state[habitId];
+      if (s == null || !s.running) {
+        _pulses[habitId]?.cancel();
+        return;
+      }
+      state = {...state};
+    });
+  }
+
+  void pause(String habitId) {
+    final current = state[habitId];
+    if (current == null || !current.running) return;
+    _pulses[habitId]?.cancel();
+    final now = DateTime.now();
+    final delta = now.difference(current.startedAt!).inMilliseconds;
+    state = {
+      ...state,
+      habitId: current.copyWith(
+        running: false,
+        accumulatedMs: current.accumulatedMs + delta,
+        startedAt: null,
+      ),
+    };
+  }
+
+  void reset(String habitId) {
+    _pulses[habitId]?.cancel();
+    _pulses.remove(habitId);
+    state = {...state}..remove(habitId);
+  }
+
+  double elapsedSec(String habitId) {
+    final s = state[habitId];
+    if (s == null) return 0.0;
+    return s.elapsedSec;
+  }
+
+  double flushAndReset(String habitId) {
+    _pulses[habitId]?.cancel();
+    _pulses.remove(habitId);
+    final s = state[habitId];
+    if (s == null) return 0.0;
+    final ms = s.accumulatedMs +
+        (s.running && s.startedAt != null
+            ? DateTime.now().difference(s.startedAt!).inMilliseconds
+            : 0);
+    state = {...state}..remove(habitId);
+    return ms / 1000.0;
+  }
+}
+
+final habitTimerProvider =
+    NotifierProvider<HabitTimerNotifier, Map<String, TimerSessionState>>(
+  HabitTimerNotifier.new,
+);

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -90,6 +91,7 @@ class HuggingFaceTokenRequiredException implements Exception {
 class GemmaService {
   bool _modelReady = false;
   bool _fallbackMode = false;
+  String? _lastError;
   InferenceModel? _model;
   // Persistent chat for multi-turn AI hub conversations.
   InferenceChat? _persistentChat;
@@ -97,8 +99,11 @@ class GemmaService {
   /// True when responses come from the real model session (not mock fallback).
   bool get realInferenceActive => _model != null && !_fallbackMode;
 
-  /// Legacy: true when mock or real “something” responds — prefer [realInferenceActive] + [AiModelUiStatus].
+  /// Legacy: true when mock or real "something" responds — prefer [realInferenceActive] + [AiModelUiStatus].
   bool get modelReady => _modelReady || _fallbackMode;
+
+  /// Why the model failed to load (for diagnostics).
+  String? get lastError => _lastError;
 
   Future<void> initialize() async {
     try {
@@ -129,15 +134,21 @@ class GemmaService {
   Future<void> _reactivateInferenceModelIfNeeded() async {
     if (_fallbackMode) return;
     if (FlutterGemma.hasActiveModel()) return;
-    if (!await isModelInstalled()) return;
 
     final path = await _resolveInstalledModelPath();
     if (path == null) {
-      debugPrint(
-        '[GemmaService] Registry lists model but .litertlm file not found on disk.',
-      );
+      debugPrint('[GemmaService] .litertlm file not found on disk.');
       return;
     }
+    // Skip if the file is clearly a partial download (< 2 GB for Gemma 4 E2B).
+    // Trying to install an incomplete file crashes the native engine.
+    try {
+      final size = await File(path).length();
+      if (size < 2 * 1024 * 1024 * 1024) {
+        debugPrint('[GemmaService] Model file too small (${(size / 1024 / 1024).round()} MB) — likely partial download, skipping reactivation.');
+        return;
+      }
+    } catch (_) {}
     try {
       await FlutterGemma.installModel(
         modelType: ModelType.gemma4,
@@ -178,19 +189,34 @@ class GemmaService {
 
   Future<bool> isModelInstalled() async {
     try {
+      // Check flutter_gemma registry first
       if (await FlutterGemma.isModelInstalled(_defaultModelFile)) return true;
-      // Some installs register under basename only — align with flutter_gemma specs.
       if (await FlutterGemma.isModelInstalled(_defaultModelBaseName)) return true;
       final ids = await FlutterGemma.listInstalledModels();
-      return ids.any(
+      final registryHit = ids.any(
         (id) =>
             id == _defaultModelFile ||
             id == _defaultModelBaseName ||
             id.endsWith(_defaultModelFile),
       );
+      if (registryHit) return true;
     } catch (e) {
-      return false;
+      debugPrint('[GemmaService] Registry check failed: $e');
     }
+    // Fallback: check if the weight file still exists on disk
+    // (flutter_gemma registry may not persist across restarts).
+    // Require > 2 GB — the full Gemma 4 E2B model is ~2.6 GB. Smaller
+    // files are partial downloads that will crash the native engine.
+    final path = await _resolveInstalledModelPath();
+    if (path != null) {
+      try {
+        final file = File(path);
+        if (await file.exists() && await file.length() > 2 * 1024 * 1024 * 1024) {
+          return true;
+        }
+      } catch (_) {}
+    }
+    return false;
   }
 
   /// Removes registry entries + weight files so a fresh [downloadModel] can run.
@@ -251,6 +277,17 @@ class GemmaService {
     final fileName = p.basename(Uri.parse(targetUrl).path);
     final filePath = p.join(modelDir.path, fileName);
     final file = File(filePath);
+
+    // Don't delete partial downloads — Dio resumes automatically.
+    // Only delete if the file is clearly corrupted (e.g. 0 bytes).
+    try {
+      if (await file.exists() && await file.length() == 0) {
+        debugPrint('[GemmaService] Removing empty model file.');
+        await file.delete();
+      }
+    } catch (e) {
+      debugPrint('[GemmaService] Could not check existing file: $e');
+    }
 
     try {
       debugPrint('[GemmaService] Downloading model via Dio → $filePath');
@@ -385,11 +422,12 @@ class GemmaService {
         maxTokens: 4096,
         preferredBackend: PreferredBackend.gpu,
         supportImage: true,
-        supportAudio: true,
         maxNumImages: 1,
       );
       _modelReady = true;
+      _lastError = null;
     } on Object catch (e) {
+      _lastError = 'GPU backend failed: $e';
       debugPrint('[GemmaService] Could not create model session (GPU): $e');
       final desktop = !kIsWeb &&
           (Platform.isMacOS || Platform.isLinux || Platform.isWindows);
@@ -399,12 +437,13 @@ class GemmaService {
             maxTokens: 4096,
             preferredBackend: PreferredBackend.cpu,
             supportImage: true,
-            supportAudio: true,
             maxNumImages: 1,
           );
           _modelReady = true;
+          _lastError = null;
           return;
         } on Object catch (e2) {
+          _lastError = 'CPU backend also failed: $e2';
           debugPrint('[GemmaService] CPU backend also failed: $e2');
         }
       }
@@ -412,6 +451,13 @@ class GemmaService {
       _persistentChat = null;
       _fallbackMode = true;
     }
+  }
+
+  /// Resets the fallback flag so the next call retries model initialization.
+  /// Call this after fixing an issue (e.g. downloading the model).
+  void resetFallback() {
+    _fallbackMode = false;
+    _lastError = null;
   }
 
   /// Clears the persistent chat history (call when the user starts a new conversation).
@@ -436,6 +482,7 @@ class GemmaService {
       // Reuse the same InferenceChat object across turns so the model has full history.
       _persistentChat ??= await _model!.createChat(
         systemInstruction: systemContext.isEmpty ? null : systemContext,
+        supportImage: true,
       );
       final userMessage = await _buildUserMessage(
         prompt,
@@ -467,6 +514,7 @@ class GemmaService {
     try {
       final chat = await _model!.createChat(
         systemInstruction: systemContext.isEmpty ? null : systemContext,
+        supportImage: true,
       );
       await chat.addQueryChunk(
         Message.text(text: prompt, isUser: true),
@@ -478,6 +526,110 @@ class GemmaService {
       return response.toString().trim();
     } catch (e) {
       debugPrint('[GemmaService] Inference error: $e');
+      return _mockResponse(prompt, systemContext: systemContext);
+    }
+  }
+
+  /// Preprocess image for vision encoder: resize to 896x896, white bg, convert to PNG.
+  static Future<Uint8List> _preprocessImage(Uint8List imageBytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(imageBytes);
+      final frame = await codec.getNextFrame();
+      final original = frame.image;
+
+      const targetSize = 896;
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      // Fill white background — vision encoders often fail on transparent PNGs
+      canvas.drawRect(
+        ui.Rect.fromLTWH(0, 0, targetSize.toDouble(), targetSize.toDouble()),
+        ui.Paint()..color = const ui.Color(0xFFFFFFFF),
+      );
+      final paint = ui.Paint()..filterQuality = ui.FilterQuality.high;
+
+      final srcW = original.width.toDouble();
+      final srcH = original.height.toDouble();
+      final srcAspect = srcW / srcH;
+
+      double drawW, drawH, offsetX, offsetY;
+      if (srcAspect > 1.0) {
+        drawW = targetSize.toDouble();
+        drawH = drawW / srcAspect;
+        offsetX = 0;
+        offsetY = (targetSize - drawH) / 2;
+      } else {
+        drawH = targetSize.toDouble();
+        drawW = drawH * srcAspect;
+        offsetX = (targetSize - drawW) / 2;
+        offsetY = 0;
+      }
+
+      canvas.drawImageRect(
+        original,
+        ui.Rect.fromLTWH(0, 0, srcW, srcH),
+        ui.Rect.fromLTWH(offsetX, offsetY, drawW, drawH),
+        paint,
+      );
+
+      final picture = recorder.endRecording();
+      final resized = await picture.toImage(targetSize, targetSize);
+      picture.dispose();
+      original.dispose();
+
+      final byteData = await resized.toByteData(format: ui.ImageByteFormat.png);
+      resized.dispose();
+
+      if (byteData == null) throw StateError('PNG encoding failed');
+      final processed = byteData.buffer.asUint8List();
+      debugPrint('[GemmaService] Preprocessed image: ${imageBytes.length} bytes → ${processed.length} bytes PNG @ ${targetSize}x$targetSize');
+      return processed;
+    } catch (e) {
+      debugPrint('[GemmaService] Image preprocessing failed: $e, using original');
+      return imageBytes;
+    }
+  }
+
+  /// Send a one-shot prompt with image bytes (no persistent chat history).
+  Future<String> askWithImage({
+    required Uint8List imageBytes,
+    required String prompt,
+    String systemContext = '',
+  }) async {
+    await _ensureSession();
+    debugPrint('[GemmaService] askWithImage: bytes=${imageBytes.length}, fallbackMode=$_fallbackMode, model=${_model != null}, lastError=$_lastError');
+    if (_fallbackMode || _model == null) {
+      debugPrint('[GemmaService] Using mock response because model not ready');
+      return _mockResponse(prompt, systemContext: systemContext);
+    }
+    try {
+      final processedBytes = await _preprocessImage(imageBytes);
+      debugPrint('[GemmaService] Creating chat with supportImage=true...');
+      final chat = await _model!.createChat(
+        systemInstruction: systemContext.isEmpty ? null : systemContext,
+        supportImage: true,
+      );
+      debugPrint('[GemmaService] Chat created, building Message.withImage...');
+      final message = Message.withImage(
+        imageBytes: processedBytes,
+        text: prompt,
+      );
+      debugPrint('[GemmaService] Message built, adding to chat...');
+      await chat.addQueryChunk(message);
+      debugPrint('[GemmaService] Generating response...');
+      final response = await chat.generateChatResponse();
+      String result;
+      if (response is TextResponse) {
+        result = response.token.trim();
+      } else {
+        result = response.toString().trim();
+      }
+      debugPrint('[GemmaService] Raw response: $result');
+      return result;
+    } catch (e, st) {
+      debugPrint('[GemmaService] Image inference error: $e\n$st');
+      // Reset session so next call recreates it
+      _model = null;
+      _persistentChat = null;
       return _mockResponse(prompt, systemContext: systemContext);
     }
   }
@@ -495,11 +647,15 @@ class GemmaService {
         debugPrint('[GemmaService] Could not read image "$imagePath": $e');
       }
     }
-    return Message(
+    if (imageBytes != null && imageBytes.isNotEmpty) {
+      return Message.withImage(
+        imageBytes: imageBytes,
+        text: prompt,
+      );
+    }
+    return Message.text(
       text: prompt,
       isUser: true,
-      imageBytes: imageBytes,
-      audioBytes: audioBytes,
     );
   }
 
@@ -549,10 +705,11 @@ class GemmaService {
 
   Future<String> generateDailyBriefing(
     List<Habit> habits,
-    List<CalorieEntry> calories,
+    List<FoodEntry> foods,
     List<WorkoutEntry> workouts,
   ) async {
-    final totalCal = calories.fold<int>(0, (s, e) => s + e.calories);
+    final totalCal = foods.fold<int>(0, (s, e) => s + e.totalCalories);
+    final totalProt = foods.fold<double>(0, (s, e) => s + e.totalProteinG);
     final topHabit = habits.isNotEmpty
         ? habits.reduce((a, b) => a.currentStreak > b.currentStreak ? a : b)
         : null;
@@ -562,6 +719,7 @@ class GemmaService {
 Here is today's wellness data:
 - Top habit: ${topHabit?.name ?? 'None'} (streak ${topHabit?.currentStreak ?? 0})
 - Calories logged: $totalCal kcal
+- Protein: ${totalProt.toStringAsFixed(0)}g
 - Workout minutes: $workoutMin
 
 Give a 2-sentence encouraging daily briefing. Keep it warm and specific.'''.trim();
@@ -792,9 +950,9 @@ JSON: {"action":"mark_habit_done","habitName":"Vitamins"}
         'fat_g': 18,
       });
     }
-    if (systemContext.isNotEmpty) {
-      return '$systemContext\n\n$prompt';
-    }
-    return 'Steady AI: $prompt';
+    // In fallback mode, NEVER leak the system prompt.
+    // Return a clear offline message so the user knows the model isn't ready.
+    return 'Steady AI is offline — the on-device model has not finished downloading yet. '
+        'Complete onboarding to enable AI commands.';
   }
 }

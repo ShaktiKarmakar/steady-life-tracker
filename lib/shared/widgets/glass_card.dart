@@ -1,9 +1,9 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 
-import '../../core/theme/app_theme.dart';
+import '../../core/design_system/design_tokens.dart';
 
+/// Simple card without glassmorphism blur.
+/// Glassmorphism is overused in AI-generated designs.
 class GlassCard extends StatelessWidget {
   const GlassCard({
     super.key,
@@ -21,17 +21,14 @@ class GlassCard extends StatelessWidget {
     return Container(
       margin: margin,
       decoration: BoxDecoration(
-        color: AppColors.glass,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.glassBorder),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Padding(padding: padding, child: child),
+        color: DesignTokens.bgSurfaceDark,
+        borderRadius: BorderRadius.circular(DesignTokens.radiusMd),
+        border: Border.all(
+          color: DesignTokens.borderDefaultDark,
+          width: DesignTokens.borderWidthDefault,
         ),
       ),
+      child: Padding(padding: padding, child: child),
     );
   }
 }

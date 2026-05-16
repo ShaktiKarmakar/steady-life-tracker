@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 
-import '../../../core/theme/app_theme.dart';
+import '../../../core/design_system/design_tokens.dart';
 import '../data/habit_templates.dart';
 import '../habit_tracker_notifier.dart';
 import '../navigation/habit_navigation.dart';
@@ -32,9 +33,11 @@ class _NewHabitPickerScreenState extends ConsumerState<NewHabitPickerScreen>
   @override
   Widget build(BuildContext context) {
     final ids = ref.watch(habitTrackerProvider).habits.map((h) => h.name).toSet();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? DesignTokens.bgBaseDark : DesignTokens.bgBaseLight;
 
     return Scaffold(
-      backgroundColor: AppColors.bgPrimary,
+      backgroundColor: bg,
       appBar: AppBar(
         title: const Text('New habit'),
         bottom: TabBar(
@@ -55,8 +58,9 @@ class _NewHabitPickerScreenState extends ConsumerState<NewHabitPickerScreen>
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () => openCustomHabit(context),
-        backgroundColor: AppColors.accentPurple,
-        icon: const Icon(Icons.edit_note),
+        backgroundColor: isDark ? DesignTokens.textPrimaryDark : DesignTokens.textPrimaryLight,
+        foregroundColor: isDark ? DesignTokens.bgBaseDark : DesignTokens.bgBaseLight,
+        icon: const Icon(LucideIcons.pencil),
         label: const Text('Custom habit'),
       ),
     );
@@ -75,6 +79,9 @@ class _TemplateList extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final list = habitTemplatesByCategory[category] ?? [];
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isDark ? DesignTokens.bgSurfaceDark : DesignTokens.bgSurfaceLight;
+
     return ListView.separated(
       padding: const EdgeInsets.all(16),
       itemCount: list.length,
@@ -83,12 +90,12 @@ class _TemplateList extends ConsumerWidget {
         final t = list[i];
         final exists = existingNames.contains(t.name);
         return ListTile(
-          tileColor: AppColors.bgSecondary,
+          tileColor: bg,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           leading: Text(t.emoji, style: const TextStyle(fontSize: 28)),
           title: Text(t.name),
           trailing: IconButton(
-            icon: Icon(exists ? Icons.add : Icons.add_circle_outline),
+            icon: Icon(exists ? LucideIcons.plus : LucideIcons.plusCircle),
             onPressed: () async {
               await ref.read(habitTrackerProvider.notifier).addHabit(t.toHabit());
               if (context.mounted) Navigator.pop(context);
